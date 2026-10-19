@@ -41,7 +41,7 @@ const resultRow = (overrides: Record<string, unknown> = {}) => ({
   selected_source_uri: uri,
   selected_source_cid: cid,
   selected_source_collection: 'org.hypercerts.claim.activity',
-  source_json: { title: 'Source' },
+  source_json: '{"title":"Source"}',
   ...overrides,
 })
 
@@ -127,7 +127,7 @@ describe('Hypercerts SQL feed definition', () => {
   it('maps exact selected sources in with-source mode', async () => {
     const sourceValue = { title: 'Exact source' }
     const database = new FakeQueryExecutor([
-      resultRow({ source_json: sourceValue }),
+      resultRow({ source_json: JSON.stringify(sourceValue) }),
     ])
     const feed = createHypercertsFeed(
       { database, metrics: new Metrics() },
@@ -151,7 +151,7 @@ describe('Hypercerts SQL feed definition', () => {
     })
     expect(database.calls[0]?.values[11]).toBe(true)
     const sql = database.calls[0]?.text ?? ''
-    expect(sql.indexOf('selected_source.json AS source_json')).toBeGreaterThan(
+    expect(sql.indexOf('selected_source.record AS source_json')).toBeGreaterThan(
       sql.indexOf('paged_events AS'),
     )
     expect(sql).toContain('ON $12::boolean')
@@ -163,6 +163,19 @@ describe('Hypercerts SQL feed definition', () => {
     )
     expect(classifiedProjection).toContain('source.collection')
     expect(classifiedProjection).not.toContain('source.json AS source_json')
+  })
+
+  it('treats malformed source JSON as invalid source data', async () => {
+    const invalidFeed = createHypercertsFeed(
+      {
+        database: new FakeQueryExecutor([resultRow({ source_json: '{' })]),
+        metrics: new Metrics(),
+      },
+      [],
+    )
+
+    const invalidPage = await invalidFeed.loadPage(params, {}, 'with-source')
+    expect(invalidPage.rows[0]?.sourceValue).toBeUndefined()
   })
 
   it.each([
@@ -189,7 +202,7 @@ describe('Hypercerts SQL feed definition', () => {
   it('preserves a present JSON null source value', async () => {
     const feed = createHypercertsFeed(
       {
-        database: new FakeQueryExecutor([resultRow({ source_json: null })]),
+        database: new FakeQueryExecutor([resultRow({ source_json: 'null' })]),
         metrics: new Metrics(),
       },
       [],

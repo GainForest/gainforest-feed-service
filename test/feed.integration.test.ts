@@ -42,63 +42,28 @@ describe('Hypercerts feed definition against Postgres', () => {
   let identities: PostgresIdentityReader
   let pages: FeedRegistry
   let service: FeedService
-  let externalLabelSeq = 0
 
   beforeAll(async () => {
     admin = new Pool({ connectionString: TEST_DATABASE_URL })
     await admin.query(`
-      CREATE TABLE IF NOT EXISTS record (
+      CREATE TABLE IF NOT EXISTS happyview_records (
         uri text PRIMARY KEY NOT NULL,
-        cid text NOT NULL,
         did text NOT NULL,
         collection text NOT NULL,
-        json jsonb NOT NULL,
-        indexed_at timestamptz NOT NULL DEFAULT NOW(),
-        rkey text GENERATED ALWAYS AS (substring(uri from '[^/]+$')) STORED,
-        record_created_at timestamptz
+        rkey text NOT NULL,
+        record text NOT NULL,
+        cid text NOT NULL,
+        indexed_at text,
+        created_at text NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_record_did_collection
-        ON record(did, collection);
-      CREATE INDEX IF NOT EXISTS idx_record_timeline_author_collection_created
-        ON record(did, collection, record_created_at DESC, uri DESC)
-        WHERE record_created_at IS NOT NULL;
-      CREATE TABLE IF NOT EXISTS actor (
-        did text PRIMARY KEY NOT NULL,
-        handle text,
-        indexed_at timestamptz NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS label_subscription_state (
-        url text PRIMARY KEY,
-        labeler_did text,
-        last_seq bigint NOT NULL DEFAULT 0,
-        last_connected_at timestamptz,
-        last_event_at timestamptz,
-        last_error text,
-        created_at timestamptz NOT NULL DEFAULT NOW(),
-        updated_at timestamptz NOT NULL DEFAULT NOW()
-      );
-      CREATE TABLE IF NOT EXISTS external_label (
-        id bigserial PRIMARY KEY,
-        subscription_url text NOT NULL,
-        seq bigint NOT NULL,
-        label_index integer NOT NULL,
+      CREATE TABLE IF NOT EXISTS happyview_labels (
         src text NOT NULL,
         uri text NOT NULL,
-        cid text,
         val text NOT NULL,
-        neg boolean NOT NULL DEFAULT false,
         cts text NOT NULL,
         exp text,
-        sig text,
-        ver integer,
-        raw_json jsonb,
-        received_at timestamptz NOT NULL DEFAULT NOW(),
-        FOREIGN KEY (subscription_url)
-          REFERENCES label_subscription_state(url) ON DELETE CASCADE,
-        UNIQUE (subscription_url, seq, label_index)
+        PRIMARY KEY (src, uri, val)
       );
-      CREATE INDEX IF NOT EXISTS idx_external_label_active_lookup
-        ON external_label(uri, val, src, cid, cts DESC, id DESC);
     `)
 
     const config = loadConfig({
@@ -118,14 +83,16 @@ describe('Hypercerts feed definition against Postgres', () => {
     await admin?.end()
   })
 
-  const seedActor = async (
-    did: string,
-    options: { readonly handle?: string } = {},
-  ): Promise<void> => {
-    await admin.query(
-      `INSERT INTO actor (did, handle, indexed_at)
-       VALUES ($1, $2, NOW())`,
-      [did, options.handle ?? null],
+  const seedDidOnlyProfile = async (did: string): Promise<void> => {
+    await seedRecord(
+      did,
+      'app.certified.actor.profile',
+      'self',
+      {
+        $type: 'app.certified.actor.profile',
+        createdAt: '2026-07-20T00:00:00Z',
+      },
+      '2026-07-20T00:00:00Z',
     )
   }
 
@@ -133,36 +100,22 @@ describe('Hypercerts feed definition against Postgres', () => {
     did: string,
     collection: string,
     rkey: string,
-    body: Record<string, unknown>,
+    body: Record<string, unknown> | string,
     effectiveAt: string,
     options: {
       readonly cid?: string
-      readonly indexedAt?: string
-      readonly recordCreatedAt?: string | null
+      readonly indexedAt?: string | null
     } = {},
   ): Promise<string> => {
     const uri = `at://${did}/${collection}/${rkey}`
-    const indexedAt = options.indexedAt ?? effectiveAt
-    const recordCreatedAt =
-      options.recordCreatedAt === undefined
-        ? effectiveAt
-        : options.recordCreatedAt
+    const indexedAt = options.indexedAt === undefined ? effectiveAt : options.indexedAt
+    const recordText = typeof body === 'string' ? body : JSON.stringify(body)
     await admin.query(
-      `INSERT INTO record (
-         uri, cid, did, collection, json, indexed_at, record_created_at
+      `INSERT INTO happyview_records (
+         uri, did, collection, rkey, record, cid, indexed_at, created_at
        )
-       VALUES (
-         $1, $2, $3, $4, $5::jsonb, $6::timestamptz, $7::timestamptz
-       )`,
-      [
-        uri,
-        options.cid ?? cid,
-        did,
-        collection,
-        JSON.stringify(body),
-        indexedAt,
-        recordCreatedAt,
-      ],
+       VALUES ($1, $2, $3, $4, $5, $6, $7, '2026-07-20 00:00:00+00')`,
+      [uri, did, collection, rkey, recordText, options.cid ?? cid, indexedAt],
     )
     return uri
   }
@@ -214,7 +167,7 @@ describe('Hypercerts feed definition against Postgres', () => {
     input: HypercertsFeedOverrides = {},
   ) => {
     const viewerDid = randomDid()
-    await seedActor(viewerDid)
+    await seedDidOnlyProfile(viewerDid)
     await Promise.all(followedDids.map((did) => seedFollow(viewerDid, did)))
     return service.getFeedSkeleton(feedRequest(viewerDid, input))
   }
@@ -231,39 +184,25 @@ describe('Hypercerts feed definition against Postgres', () => {
       effectiveAt,
     )
 
-  const seedExternalLabel = async (
+  const seedHappyViewLabel = async (
     src: string,
     uri: string,
     val: string,
     options: {
-      readonly cid?: string | null
-      readonly neg?: boolean
       readonly cts?: string
       readonly exp?: string | null
     } = {},
   ): Promise<void> => {
-    const subscriptionUrl = `https://labels.example.test/${src}`
     await admin.query(
-      `INSERT INTO label_subscription_state (url, labeler_did)
-       VALUES ($1, $2)
-       ON CONFLICT (url) DO NOTHING`,
-      [subscriptionUrl, src],
-    )
-    externalLabelSeq += 1
-    await admin.query(
-      `INSERT INTO external_label (
-         subscription_url, seq, label_index, src, uri, cid, val, neg, cts, exp
-       )
-       VALUES ($1, $2, 0, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO happyview_labels (src, uri, val, cts, exp)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (src, uri, val) DO UPDATE
+       SET cts = EXCLUDED.cts, exp = EXCLUDED.exp`,
       [
-        subscriptionUrl,
-        externalLabelSeq,
         src,
         uri,
-        options.cid ?? null,
         val,
-        options.neg ?? false,
-        options.cts ?? '2026-07-20T00:00:00Z',
+        options.cts ?? '2026-07-20 00:00:00+00',
         options.exp ?? null,
       ],
     )
@@ -276,12 +215,17 @@ describe('Hypercerts feed definition against Postgres', () => {
     const did = randomDid()
     await expect(
       database.query(
-        `INSERT INTO record (
-           uri, cid, did, collection, json, indexed_at, record_created_at
+        `INSERT INTO happyview_records (
+           uri, did, collection, rkey, record, cid, indexed_at, created_at
          )
-         VALUES ($1, $2, $3, $4, '{}'::jsonb, NOW(), NOW())`,
-        [`at://${did}/org.hypercerts.claim.activity/read-only`, cid, did,
-          'org.hypercerts.claim.activity'],
+         VALUES ($1, $2, $3, $4, '{}', $5, '2026-07-20 00:00:00+00', '2026-07-20 00:00:00+00')`,
+        [
+          `at://${did}/org.hypercerts.claim.activity/read-only`,
+          did,
+          'org.hypercerts.claim.activity',
+          'read-only',
+          cid,
+        ],
       ),
     ).rejects.toThrow(/read-only/i)
   })
@@ -294,7 +238,7 @@ describe('Hypercerts feed definition against Postgres', () => {
       marker: 'selected-source-body',
       createdAt: '2026-07-20T00:00:02Z',
     }
-    await Promise.all([seedActor(viewer), seedActor(author)])
+    await Promise.all([seedDidOnlyProfile(viewer), seedDidOnlyProfile(author)])
     await seedFollow(viewer, author)
     const selectedUri = await seedRecord(
       author,
@@ -341,37 +285,23 @@ describe('Hypercerts feed definition against Postgres', () => {
     expect(metadata.cursor).toBeDefined()
   })
 
-  it('batches actor and both deterministic profile contexts', async () => {
+  it('reads only current Certified profiles and returns DID-only fallbacks', async () => {
     const actorWithProfiles = randomDid()
-    const actorOnly = randomDid()
-    const certifiedOnly = randomDid()
     const blueskyOnly = randomDid()
     const missingIdentity = randomDid()
     const wrongCollection = randomDid()
-    const sourceDidMismatch = randomDid()
     const staleCertified = { marker: 'stale-certified-self' }
     const currentCertified = { marker: 'current-certified-self' }
     const blueskyBody = { marker: 'bluesky-self' }
-    const certifiedOnlyBody = { marker: 'certified-only' }
-    const blueskyOnlyBody = { marker: 'bluesky-only' }
     const certifiedUri =
       `at://${actorWithProfiles}/app.certified.actor.profile/self`
 
-    await seedActor(actorWithProfiles, { handle: 'alice.example' })
-    await seedActor(actorOnly)
-    await admin.query(
-      `INSERT INTO record (
-         uri, cid, did, collection, json, indexed_at, record_created_at
-       )
-       VALUES (
-         $1, $2, $3, 'app.certified.actor.profile', $4::jsonb, NOW(), NOW()
-       )`,
-      [
-        certifiedUri,
-        cid,
-        sourceDidMismatch,
-        JSON.stringify(staleCertified),
-      ],
+    await seedRecord(
+      actorWithProfiles,
+      'app.certified.actor.profile',
+      'self',
+      staleCertified,
+      '2026-07-20T00:00:00Z',
     )
     await seedRecord(
       actorWithProfiles,
@@ -381,36 +311,22 @@ describe('Hypercerts feed definition against Postgres', () => {
       '2026-07-20T00:00:00Z',
     )
     await seedRecord(
-      certifiedOnly,
-      'app.certified.actor.profile',
-      'self',
-      certifiedOnlyBody,
-      '2026-07-20T00:00:00Z',
-    )
-    await seedRecord(
       blueskyOnly,
       'app.bsky.actor.profile',
       'self',
-      blueskyOnlyBody,
+      blueskyBody,
+      '2026-07-20T00:00:00Z',
+    )
+    await seedRecord(
+      wrongCollection,
+      'org.hypercerts.collection',
+      'self',
+      { marker: 'not-a-profile' },
       '2026-07-20T00:00:00Z',
     )
     await admin.query(
-      `INSERT INTO record (
-         uri, cid, did, collection, json, indexed_at, record_created_at
-       )
-       VALUES (
-         $1, $2, $3, 'org.hypercerts.collection', $4::jsonb, NOW(), NOW()
-       )`,
-      [
-        `at://${wrongCollection}/app.bsky.actor.profile/self`,
-        cid,
-        wrongCollection,
-        JSON.stringify({ marker: 'wrong-collection' }),
-      ],
-    )
-    await admin.query(
-      `UPDATE record
-       SET cid = $2, json = $3::jsonb
+      `UPDATE happyview_records
+       SET cid = $2, record = $3
        WHERE uri = $1`,
       [certifiedUri, staleCid, JSON.stringify(currentCertified)],
     )
@@ -418,8 +334,6 @@ describe('Hypercerts feed definition against Postgres', () => {
     await expect(
       identities.getByDids([
         actorWithProfiles,
-        actorOnly,
-        certifiedOnly,
         blueskyOnly,
         missingIdentity,
         wrongCollection,
@@ -427,33 +341,8 @@ describe('Hypercerts feed definition against Postgres', () => {
       ]),
     ).resolves.toEqual(
       new Map([
-        [
-          actorWithProfiles,
-          {
-            did: actorWithProfiles,
-            actor: {
-              did: actorWithProfiles,
-              handle: 'alice.example',
-            },
-            certifiedProfile: currentCertified,
-            blueskyProfile: blueskyBody,
-          },
-        ],
-        [
-          actorOnly,
-          {
-            did: actorOnly,
-            actor: {
-              did: actorOnly,
-              handle: null,
-            },
-          },
-        ],
-        [
-          certifiedOnly,
-          { did: certifiedOnly, certifiedProfile: certifiedOnlyBody },
-        ],
-        [blueskyOnly, { did: blueskyOnly, blueskyProfile: blueskyOnlyBody }],
+        [actorWithProfiles, { did: actorWithProfiles, certifiedProfile: currentCertified }],
+        [blueskyOnly, { did: blueskyOnly }],
         [missingIdentity, { did: missingIdentity }],
         [wrongCollection, { did: wrongCollection }],
       ]),
@@ -472,11 +361,11 @@ describe('Hypercerts feed definition against Postgres', () => {
     const malformedAccount = `invalid-${randomBytes(8).toString('hex')}`
 
     await Promise.all([
-      seedActor(viewer),
-      seedActor(followedOrg),
-      seedActor(blockedOrg),
-      seedActor(evaluator),
-      seedActor(awardSubject),
+      seedDidOnlyProfile(viewer),
+      seedDidOnlyProfile(followedOrg),
+      seedDidOnlyProfile(blockedOrg),
+      seedDidOnlyProfile(evaluator),
+      seedDidOnlyProfile(awardSubject),
       seedOrganization(followedOrg),
       seedOrganization(blockedOrg),
     ])
@@ -495,22 +384,14 @@ describe('Hypercerts feed definition against Postgres', () => {
       )
     }
 
-    await seedExternalLabel(trustedLabeler, followedOrg, 'high-quality')
-    await seedExternalLabel(trustedLabeler, blockedOrg, 'likely-test')
-    await seedExternalLabel(randomDid(), blockedOrg, 'high-quality', {
-      cts: '2026-07-20T00:00:01Z',
-    })
-    await seedExternalLabel(
+    await seedHappyViewLabel(trustedLabeler, followedOrg, 'high-quality')
+    await seedHappyViewLabel(trustedLabeler, blockedOrg, 'likely-test')
+    await seedHappyViewLabel(randomDid(), blockedOrg, 'high-quality')
+    await seedHappyViewLabel(
       trustedLabeler,
       `at://${blockedOrg}/app.certified.actor.organization/self`,
       'high-quality',
-      { cts: '2026-07-20T00:00:02Z' },
     )
-    await seedExternalLabel(trustedLabeler, blockedOrg, 'high-quality', {
-      cid,
-      cts: '2026-07-20T00:00:03Z',
-    })
-
     const definitionUri = await seedRecord(
       evaluator,
       'app.certified.badge.definition',
@@ -588,21 +469,12 @@ describe('Hypercerts feed definition against Postgres', () => {
       { contentType: 'audit', createdAt: '2026-07-21T08:30:00Z' },
       '2026-07-21T08:30:00Z',
     )
-    const boardUri = await seedRecord(
-      followedOrg,
-      'org.hyperboards.board',
-      'board',
-      { createdAt: { malformed: true } },
-      '2026-07-21T08:00:00Z',
-      { recordCreatedAt: null },
-    )
     const dateOnlyUri = await seedRecord(
       followedOrg,
       'org.hypercerts.context.measurement',
       'date-only-created-at',
       { createdAt: '2026-07-22' },
       '2026-07-21T07:30:00Z',
-      { recordCreatedAt: null },
     )
     await seedRecord(
       blockedOrg,
@@ -701,7 +573,6 @@ describe('Hypercerts feed definition against Postgres', () => {
       'evaluation.create',
       'project.created_with_cert',
       'update.create',
-      'hyperboard.create',
       'measurement.create',
       'cert.create',
       'endorsement.award',
@@ -710,16 +581,12 @@ describe('Hypercerts feed definition against Postgres', () => {
       expect.stringContaining('/org.hypercerts.context.evaluation/'),
       collectionUri,
       expect.stringContaining('/org.hypercerts.context.attachment/update'),
-      boardUri,
       dateOnlyUri,
       endorsedUri,
       visibleAwardUri,
     ])
     expect(output.feed.some((item) => item.subject === activityUri)).toBe(false)
     expect(metadata.rows[0]?.sortValue).toBe('2026-07-21T11:00:00.000000Z')
-    expect(
-      metadata.rows.find((item) => item.uri === boardUri)?.sortValue,
-    ).toBe('2026-07-21T08:00:00.000000Z')
     expect(
       metadata.rows.find((item) => item.uri === dateOnlyUri)?.sortValue,
     ).toBe('2026-07-21T07:30:00.000000Z')
@@ -734,37 +601,6 @@ describe('Hypercerts feed definition against Postgres', () => {
     expect(projectOnly.feed).toHaveLength(1)
     expect(projectOnly.feed[0]?.subject).toBe(collectionUri)
 
-    await seedExternalLabel(trustedLabeler, blockedOrg, 'likely-test', {
-      neg: true,
-      cts: '2026-07-20T00:00:00Z',
-      exp: '2000-01-01T00:00:00Z',
-    })
-    const expiredNegation = await getFeedForFollows([blockedOrg], {
-      organizationQuality: { allowed: ['high-quality'], includeUnrated: true },
-    })
-    expect(expiredNegation.feed).toEqual([])
-
-    const activelyNegatedOrg = randomDid()
-    await Promise.all([
-      seedActor(activelyNegatedOrg),
-      seedOrganization(activelyNegatedOrg),
-    ])
-    const activeNegationUri = await seedRecord(
-      activelyNegatedOrg,
-      'org.hypercerts.claim.activity',
-      'active-negation',
-      { createdAt: '2026-07-21T04:00:00Z' },
-      '2026-07-21T04:00:00Z',
-    )
-    await seedExternalLabel(trustedLabeler, activelyNegatedOrg, 'likely-test')
-    await seedExternalLabel(trustedLabeler, activelyNegatedOrg, 'likely-test', {
-      neg: true,
-      cts: '2026-07-20T00:00:01Z',
-    })
-    const activeNegation = await getFeedForFollows([activelyNegatedOrg], {
-      organizationQuality: { allowed: ['high-quality'], includeUnrated: true },
-    })
-    expect(activeNegation.feed).toEqual([{ subject: activeNegationUri }])
   })
 
   it('detects organizations only through the exact organization self record', async () => {
@@ -772,7 +608,7 @@ describe('Hypercerts feed definition against Postgres', () => {
     const personWithNearMatch = randomDid()
     const organization = randomDid()
     await Promise.all([
-      seedActor(viewer),
+      seedDidOnlyProfile(viewer),
       seedRecord(
         personWithNearMatch,
         'app.certified.actor.organization',
@@ -812,80 +648,93 @@ describe('Hypercerts feed definition against Postgres', () => {
     ])
   })
 
-  it('ignores malformed external-label timestamps without asserting or negating quality', async () => {
-    const viewer = randomDid()
+  it('filters organizations using active trusted bare-DID HappyView labels', async () => {
     const trustedLabeler = randomDid()
-    const malformedCtsAssertion = randomDid()
-    const malformedExpAssertion = randomDid()
-    const malformedCtsNegation = randomDid()
-    const malformedExpNegation = randomDid()
-    const unlabeled = randomDid()
+    const untrustedLabeler = randomDid()
+    const allowedOrg = randomDid()
+    const disallowedOrg = randomDid()
+    const expiredOrg = randomDid()
+    const untrustedOrg = randomDid()
+    const malformedExpiryOrg = randomDid()
+    const dateOnlyExpiryOrg = randomDid()
+    const infiniteExpiryOrg = randomDid()
+    const infiniteCtsOrg = randomDid()
+    const dateOnlyCtsOrg = randomDid()
+    const recordLabelOrg = randomDid()
+    const unratedOrg = randomDid()
     const organizations = [
-      malformedCtsAssertion,
-      malformedExpAssertion,
-      malformedCtsNegation,
-      malformedExpNegation,
-      unlabeled,
+      { did: allowedOrg, createdAt: '2026-07-21T12:00:00Z' },
+      { did: disallowedOrg, createdAt: '2026-07-21T11:00:00Z' },
+      { did: expiredOrg, createdAt: '2026-07-21T10:00:00Z' },
+      { did: untrustedOrg, createdAt: '2026-07-21T09:00:00Z' },
+      { did: malformedExpiryOrg, createdAt: '2026-07-21T08:30:00Z' },
+      { did: recordLabelOrg, createdAt: '2026-07-21T08:00:00Z' },
+      { did: dateOnlyExpiryOrg, createdAt: '2026-07-21T07:55:00Z' },
+      { did: infiniteExpiryOrg, createdAt: '2026-07-21T07:45:00Z' },
+      { did: infiniteCtsOrg, createdAt: '2026-07-21T07:30:00Z' },
+      { did: dateOnlyCtsOrg, createdAt: '2026-07-21T07:15:00Z' },
+      { did: unratedOrg, createdAt: '2026-07-21T07:00:00Z' },
     ]
+    const activityUris = new Map<string, string>()
 
-    await Promise.all([
-      seedActor(viewer),
-      ...organizations.map((did, index) =>
-        seedOrganization(did, `2026-07-21T00:00:0${index}Z`),
-      ),
-      ...organizations.map((did, index) =>
+    await Promise.all(
+      organizations.flatMap(({ did, createdAt }) => [
+        seedOrganization(did),
         seedRecord(
           did,
           'org.hypercerts.claim.activity',
-          'quality-timestamp',
-          { createdAt: `2026-07-21T01:00:0${index}Z` },
-          `2026-07-21T01:00:0${index}Z`,
-        ),
-      ),
-    ])
-    await seedExternalLabel(
-      trustedLabeler,
-      malformedCtsAssertion,
-      'high-quality',
-      { cts: 'not-a-timestamp' },
+          'quality-projection',
+          { createdAt },
+          createdAt,
+        ).then((uri) => activityUris.set(did, uri)),
+      ]),
     )
-    await seedExternalLabel(
+    await seedHappyViewLabel(trustedLabeler, allowedOrg, 'high-quality')
+    await seedHappyViewLabel(trustedLabeler, disallowedOrg, 'likely-test')
+    await seedHappyViewLabel(trustedLabeler, expiredOrg, 'high-quality', {
+      exp: '2000-01-01 00:00:00+00',
+    })
+    await seedHappyViewLabel(
       trustedLabeler,
-      malformedExpAssertion,
+      malformedExpiryOrg,
       'high-quality',
       { exp: 'not-a-timestamp' },
     )
-    await seedExternalLabel(
+    await seedHappyViewLabel(
       trustedLabeler,
-      malformedCtsNegation,
-      'likely-test',
+      dateOnlyExpiryOrg,
+      'high-quality',
+      { exp: '2999-01-01' },
     )
-    await seedExternalLabel(
+    await seedHappyViewLabel(
       trustedLabeler,
-      malformedCtsNegation,
-      'likely-test',
-      { neg: true, cts: 'not-a-timestamp' },
+      infiniteExpiryOrg,
+      'high-quality',
+      { exp: 'infinity' },
     )
-    await seedExternalLabel(
+    await seedHappyViewLabel(
       trustedLabeler,
-      malformedExpNegation,
-      'likely-test',
+      infiniteCtsOrg,
+      'high-quality',
+      { cts: '-infinity' },
     )
-    await seedExternalLabel(
+    await seedHappyViewLabel(
       trustedLabeler,
-      malformedExpNegation,
-      'likely-test',
-      {
-        neg: true,
-        cts: '2026-07-20T00:00:01Z',
-        exp: 'not-a-timestamp',
-      },
+      dateOnlyCtsOrg,
+      'high-quality',
+      { cts: '2999-01-01' },
+    )
+    await seedHappyViewLabel(untrustedLabeler, untrustedOrg, 'high-quality')
+    await seedHappyViewLabel(
+      trustedLabeler,
+      `at://${recordLabelOrg}/app.certified.actor.organization/self`,
+      'high-quality',
     )
 
     pages = createPages([trustedLabeler])
     service = new FeedService(pages)
-    const assertions = await getFeedForFollows(
-      [malformedCtsAssertion, malformedExpAssertion],
+    const ratedOnly = await getFeedForFollows(
+      organizations.map(({ did }) => did),
       {
         organizationQuality: {
           allowed: ['high-quality'],
@@ -893,124 +742,137 @@ describe('Hypercerts feed definition against Postgres', () => {
         },
       },
     )
-    expect(assertions.feed).toEqual([])
+    expect(ratedOnly.feed.map((item) => item.subject)).toEqual([
+      activityUris.get(allowedOrg),
+    ])
 
-    const negations = await getFeedForFollows(
-      [malformedCtsNegation, malformedExpNegation, unlabeled],
+    const withUnrated = await getFeedForFollows(
+      organizations.map(({ did }) => did),
       {
         organizationQuality: {
-        allowed: ['high-quality'],
+          allowed: ['high-quality'],
           includeUnrated: true,
         },
       },
     )
-    expect(negations.feed).toEqual([
-      {
-        subject: `at://${unlabeled}/org.hypercerts.claim.activity/quality-timestamp`,
-      },
+    expect(withUnrated.feed.map((item) => item.subject)).toEqual([
+      activityUris.get(allowedOrg),
+      activityUris.get(expiredOrg),
+      activityUris.get(untrustedOrg),
+      activityUris.get(malformedExpiryOrg),
+      activityUris.get(recordLabelOrg),
+      activityUris.get(dateOnlyExpiryOrg),
+      activityUris.get(infiniteExpiryOrg),
+      activityUris.get(infiniteCtsOrg),
+      activityUris.get(dateOnlyCtsOrg),
+      activityUris.get(unratedOrg),
     ])
   })
 
-  it('expires positive labels and lets equal-time negations cancel assertions', async () => {
-    const viewer = randomDid()
-    const trustedLabeler = randomDid()
-    const expiredAssertionOrg = randomDid()
-    const equalNegationOrg = randomDid()
-    await Promise.all([
-      seedActor(viewer),
-      seedOrganization(expiredAssertionOrg),
-      seedOrganization(equalNegationOrg),
-      seedRecord(
-        expiredAssertionOrg,
-        'org.hypercerts.claim.activity',
-        'expired-assertion',
-        { createdAt: '2026-07-21T03:00:00Z' },
-        '2026-07-21T03:00:00Z',
-      ),
-      seedRecord(
-        equalNegationOrg,
-        'org.hypercerts.claim.activity',
-        'equal-negation',
-        { createdAt: '2026-07-21T04:00:00Z' },
-        '2026-07-21T04:00:00Z',
-      ),
-    ])
-    await seedExternalLabel(
-      trustedLabeler,
-      expiredAssertionOrg,
-      'high-quality',
-      { exp: '2000-01-01T00:00:00Z' },
-    )
-    const equalCts = '2026-07-20T00:00:00Z'
-    await seedExternalLabel(
-      trustedLabeler,
-      equalNegationOrg,
-      'likely-test',
-      { cts: equalCts },
-    )
-    await seedExternalLabel(
-      trustedLabeler,
-      equalNegationOrg,
-      'likely-test',
-      { neg: true, cts: equalCts },
-    )
-
-    pages = createPages([trustedLabeler])
-    service = new FeedService(pages)
-    const expired = await getFeedForFollows([expiredAssertionOrg], {
-      organizationQuality: {
-        allowed: ['high-quality'],
-        includeUnrated: false,
-      },
-    })
-    expect(expired.feed).toEqual([])
-
-    const equalNegation = await getFeedForFollows([equalNegationOrg], {
-      organizationQuality: {
-        allowed: ['high-quality'],
-        includeUnrated: true,
-      },
-    })
-    expect(equalNegation.feed).toEqual([
-      {
-        subject: `at://${equalNegationOrg}/org.hypercerts.claim.activity/equal-negation`,
-      },
-    ])
-  })
-
-  it('orders by record_created_at and falls back to indexed_at', async () => {
+  it('orders by valid JSON createdAt and safely falls back to indexed_at', async () => {
     const viewer = randomDid()
     const author = randomDid()
-    await seedActor(viewer)
-    const materialized = await seedRecord(
+    await seedDidOnlyProfile(viewer)
+    const indexedLaterAcrossOffsets = await seedRecord(
       author,
       'org.hypercerts.context.measurement',
-      'materialized-time',
-      { createdAt: '2000-01-01T00:00:00Z' },
-      '2026-07-21T12:00:00Z',
-      { indexedAt: '2026-07-21T01:00:00Z' },
+      'indexed-later-across-offsets',
+      {},
+      '2026-07-21 10:00:00-04',
     )
-    const fallback = await seedRecord(
+    const indexedEarlierUtc = await seedRecord(
       author,
       'org.hypercerts.context.measurement',
-      'indexed-fallback',
-      { createdAt: '2099-01-01T00:00:00Z' },
-      '2026-07-21T11:00:00Z',
-      { recordCreatedAt: null },
+      'indexed-earlier-utc',
+      {},
+      '2026-07-21 13:30:00+00',
+    )
+    const jsonCreatedAt = await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'json-created-at',
+      { createdAt: '2026-07-21T12:00:00Z' },
+      '2026-07-21 15:00:00+00',
+    )
+    const malformedCreatedAt = await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'malformed-created-at',
+      { createdAt: '2026-02-31T11:00:00Z' },
+      '2026-07-21 11:00:00+00',
+    )
+    const dateOnlyCreatedAt = await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'date-only-created-at',
+      { createdAt: '2026-07-21' },
+      '2026-07-21 10:00:00+00',
+    )
+    const malformedJson = await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'malformed-json',
+      '{malformed-json',
+      '2026-07-21 09:00:00+00',
+    )
+    const createdAtWithNullIndex = await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'created-at-null-index',
+      { createdAt: '2026-07-21T08:30:00Z' },
+      '2026-07-21 08:30:00+00',
+      { indexedAt: null },
+    )
+    await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'null-index-without-created-at',
+      {},
+      '2026-07-21 08:00:00+00',
+      { indexedAt: null },
+    )
+    await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'infinite-index',
+      {},
+      '2026-07-21 08:00:00+00',
+      { indexedAt: 'infinity' },
+    )
+    await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'negative-infinite-index',
+      {},
+      '2026-07-21 08:00:00+00',
+      { indexedAt: '-infinity' },
+    )
+    await seedRecord(
+      author,
+      'org.hypercerts.context.measurement',
+      'date-only-index',
+      {},
+      '2026-07-21 08:00:00+00',
+      { indexedAt: '2999-01-01' },
     )
 
     const output = await getFeedForFollows([author])
 
     expect(output.feed.map((item) => item.subject)).toEqual([
-      materialized,
-      fallback,
+      indexedLaterAcrossOffsets,
+      indexedEarlierUtc,
+      jsonCreatedAt,
+      malformedCreatedAt,
+      dateOnlyCreatedAt,
+      malformedJson,
+      createdAtWithNullIndex,
     ])
   })
 
   it('pairs projects by effective timestamps, including indexed_at fallback', async () => {
     const viewer = randomDid()
     const author = randomDid()
-    await seedActor(viewer)
+    await seedDidOnlyProfile(viewer)
 
     const materializedActivity = await seedRecord(
       author,
@@ -1037,7 +899,6 @@ describe('Hypercerts feed definition against Postgres', () => {
       'fallback-pair-activity',
       { createdAt: { malformed: true } },
       '2026-07-21T11:00:30Z',
-      { recordCreatedAt: null },
     )
     const fallbackCollection = await seedRecord(
       author,
@@ -1047,7 +908,6 @@ describe('Hypercerts feed definition against Postgres', () => {
         items: [{ itemIdentifier: { uri: fallbackActivity, cid } }],
       },
       '2026-07-21T11:00:00Z',
-      { recordCreatedAt: null },
     )
 
     await seedFollow(viewer, author)
@@ -1069,10 +929,12 @@ describe('Hypercerts feed definition against Postgres', () => {
     const viewer = randomDid()
     const evaluator = randomDid()
     const subject = randomDid()
+    const offsetOrderedSubject = randomDid()
     await Promise.all([
-      seedActor(viewer),
-      seedActor(evaluator),
-      seedActor(subject),
+      seedDidOnlyProfile(viewer),
+      seedDidOnlyProfile(evaluator),
+      seedDidOnlyProfile(subject),
+      seedDidOnlyProfile(offsetOrderedSubject),
     ])
 
     const definitionUri = await seedRecord(
@@ -1125,13 +987,57 @@ describe('Hypercerts feed definition against Postgres', () => {
       { indexedAt: '2026-07-21T03:30:00Z' },
     )
 
+    const offsetOrderedAwardUri = await seedRecord(
+      evaluator,
+      'app.certified.badge.award',
+      'offset-response-order-award',
+      {
+        badge: { uri: definitionUri, cid },
+        subject: {
+          $type: 'app.certified.defs#did',
+          did: offsetOrderedSubject,
+        },
+        createdAt: '2026-07-21T02:30:00Z',
+      },
+      '2026-07-21T02:30:00Z',
+    )
+    const offsetOrderedActivity = await seedRecord(
+      offsetOrderedSubject,
+      'org.hypercerts.claim.activity',
+      'offset-response-order-activity',
+      { createdAt: '2026-07-21T03:30:00Z' },
+      '2026-07-21T03:30:00Z',
+    )
+    await seedRecord(
+      offsetOrderedSubject,
+      'app.certified.badge.response',
+      'lexically-later-rejection',
+      {
+        badgeAward: { uri: offsetOrderedAwardUri, cid },
+        response: 'rejected',
+      },
+      '2026-07-21 13:30:00+00',
+    )
+    await seedRecord(
+      offsetOrderedSubject,
+      'app.certified.badge.response',
+      'chronologically-later-acceptance',
+      {
+        badgeAward: { uri: offsetOrderedAwardUri, cid },
+        response: 'accepted',
+      },
+      '2026-07-21 10:00:00-04',
+    )
+
     const output = await getFeedForFollows([evaluator], {
       trustedEvaluators: [evaluator],
       limit: 50,
     })
 
     expect(output.feed.map((item) => item.subject)).toEqual([
+      offsetOrderedActivity,
       subjectActivity,
+      offsetOrderedAwardUri,
       awardUri,
     ])
   })
@@ -1142,10 +1048,10 @@ describe('Hypercerts feed definition against Postgres', () => {
     const allowedIssuer = randomDid()
     const disallowedSubject = randomDid()
     await Promise.all([
-      seedActor(viewer),
-      seedActor(disallowedIssuer),
-      seedActor(allowedIssuer),
-      seedActor(disallowedSubject),
+      seedDidOnlyProfile(viewer),
+      seedDidOnlyProfile(disallowedIssuer),
+      seedDidOnlyProfile(allowedIssuer),
+      seedDidOnlyProfile(disallowedSubject),
     ])
 
     const definitionUri = await seedRecord(
@@ -1232,9 +1138,9 @@ describe('Hypercerts feed definition against Postgres', () => {
     const evaluator = randomDid()
     const recordOwner = randomDid()
     await Promise.all([
-      seedActor(viewer),
-      seedActor(evaluator),
-      seedActor(recordOwner),
+      seedDidOnlyProfile(viewer),
+      seedDidOnlyProfile(evaluator),
+      seedDidOnlyProfile(recordOwner),
     ])
 
     const targetActivity = await seedRecord(
@@ -1294,9 +1200,9 @@ describe('Hypercerts feed definition against Postgres', () => {
     const author = randomDid()
     const endorsementSubject = randomDid()
     await Promise.all([
-      seedActor(viewer),
-      seedActor(author),
-      seedActor(endorsementSubject),
+      seedDidOnlyProfile(viewer),
+      seedDidOnlyProfile(author),
+      seedDidOnlyProfile(endorsementSubject),
     ])
 
     const activityUri = await seedRecord(
@@ -1370,7 +1276,7 @@ describe('Hypercerts feed definition against Postgres', () => {
   it('suppresses a paired activity across a pagination boundary', async () => {
     const viewer = randomDid()
     const author = randomDid()
-    await Promise.all([seedActor(viewer), seedActor(author)])
+    await Promise.all([seedDidOnlyProfile(viewer), seedDidOnlyProfile(author)])
 
     const pairedActivity = await seedRecord(
       author,
@@ -1423,7 +1329,7 @@ describe('Hypercerts feed definition against Postgres', () => {
   it('paginates equal timestamps by descending URI without repeats', async () => {
     const viewer = randomDid()
     const author = randomDid()
-    await Promise.all([seedActor(viewer), seedActor(author)])
+    await Promise.all([seedDidOnlyProfile(viewer), seedDidOnlyProfile(author)])
 
     const uris: string[] = []
     for (const rkey of ['a', 'b', 'c']) {
@@ -1458,7 +1364,7 @@ describe('Hypercerts feed definition against Postgres', () => {
   it('ignores malformed follow subjects before they can enter the feed', async () => {
     const viewer = randomDid()
     const malformedDid = `invalid-${randomBytes(8).toString('hex')}`
-    await seedActor(viewer)
+    await seedDidOnlyProfile(viewer)
     await seedRecord(
       viewer,
       'app.certified.graph.follow',
@@ -1484,9 +1390,9 @@ describe('Hypercerts feed definition against Postgres', () => {
     const evaluator = randomDid()
     const subject = randomDid()
     await Promise.all([
-      seedActor(viewer),
-      seedActor(evaluator),
-      seedActor(subject),
+      seedDidOnlyProfile(viewer),
+      seedDidOnlyProfile(evaluator),
+      seedDidOnlyProfile(subject),
     ])
 
     const definitionUri = await seedRecord(
@@ -1537,7 +1443,7 @@ describe('Hypercerts feed definition against Postgres', () => {
     const viewer = randomDid()
     const followedAuthor = randomDid()
     const unfollowedAuthor = randomDid()
-    await seedActor(viewer)
+    await seedDidOnlyProfile(viewer)
     const followedUri = await seedRecord(
       followedAuthor,
       'org.hypercerts.claim.activity',
@@ -1568,22 +1474,22 @@ describe('Hypercerts feed definition against Postgres', () => {
     const viewer = randomDid()
     const followedDids = Array.from({ length: 501 }, randomDid)
     const selectedAuthor = followedDids.at(-1)!
-    await seedActor(viewer)
+    await seedDidOnlyProfile(viewer)
     await admin.query(
-      `INSERT INTO record (
-         uri, cid, did, collection, json, indexed_at, record_created_at
+      `INSERT INTO happyview_records (
+         uri, did, collection, rkey, record, cid, indexed_at, created_at
        )
        SELECT
          'at://' || $1::text || '/app.certified.graph.follow/scope-' ||
            followed.ordinality::text,
-         $2::text,
          $1::text,
          'app.certified.graph.follow',
-         jsonb_build_object('subject', followed.did),
-         '2026-07-22T10:00:00Z'::timestamptz +
-           followed.ordinality * INTERVAL '1 millisecond',
-         '2026-07-22T10:00:00Z'::timestamptz +
-           followed.ordinality * INTERVAL '1 millisecond'
+         'scope-' || followed.ordinality::text,
+         jsonb_build_object('subject', followed.did)::text,
+         $2::text,
+         ('2026-07-22T10:00:00Z'::timestamptz +
+           followed.ordinality * INTERVAL '1 millisecond')::text,
+         '2026-07-20 00:00:00+00'
        FROM unnest($3::text[]) WITH ORDINALITY AS followed(did, ordinality)`,
       [viewer, cid, followedDids],
     )

@@ -20,7 +20,7 @@
     "test:unit": "vitest run test/*.unit.test.ts",
     "pretest:integration": "npm run codegen",
     "test:integration": "vitest run test/*.integration.test.ts",
-    "test:integration:hyperindex": "sh scripts/test-hyperindex-schema.sh",
+    "test:integration:happyview": "sh scripts/test-happyview-schema.sh && npm run test:integration",
     "version:packages": "changeset version && npm install --package-lock-only --ignore-scripts",
     "precheck": "npm run codegen",
     "check": "tsc -p tsconfig.json --noEmit",

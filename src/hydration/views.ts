@@ -8,10 +8,8 @@ import type {
   EvaluationFeedView,
   FeedItemView,
   FeedTargetReference,
-  HyperboardFeedView,
   LargeImageReference,
   MeasurementFeedView,
-  SanitizedActorRow,
   SmallBlobImageReference,
   UpdateFeedView,
   UriImageReference,
@@ -20,7 +18,6 @@ import {
   getEndorsedActorDid,
   isMeaningfulCertifiedProfile,
   toProtocolBlobRef,
-  type ValidatedBlueskyProfile,
   type ValidatedCertifiedProfile,
   type ValidatedFeedRecord,
 } from './validation.js'
@@ -75,18 +72,10 @@ const smallBlobImageReference = (
     : { $type: 'org.hypercerts.defs#smallBlob', blob }
 }
 
-const blueskyAvatar = (
-  profile: ValidatedBlueskyProfile,
-): ActorImageReference | undefined =>
-  profile.avatar === undefined
-    ? undefined
-    : { $type: 'org.hypercerts.defs#smallImage', image: profile.avatar }
-
-/** Applies Certified, Bluesky, and stored identity precedence. */
+/** Uses a meaningful Certified profile, otherwise returns a DID-only identity. */
 export const buildActorSummary = (
-  actor: SanitizedActorRow,
+  did: string,
   certifiedProfile: ValidatedCertifiedProfile | undefined,
-  blueskyProfile: ValidatedBlueskyProfile | undefined,
 ): ActorSummary => {
   if (
     certifiedProfile &&
@@ -94,8 +83,7 @@ export const buildActorSummary = (
   ) {
     const avatar = smallImageReference(certifiedProfile.avatar)
     return {
-      did: actor.did,
-      ...(actor.handle === undefined ? {} : { handle: actor.handle }),
+      did,
       ...(certifiedProfile.displayName === undefined
         ? {}
         : { displayName: certifiedProfile.displayName }),
@@ -103,22 +91,7 @@ export const buildActorSummary = (
     }
   }
 
-  if (blueskyProfile !== undefined) {
-    const avatar = blueskyAvatar(blueskyProfile)
-    return {
-      did: actor.did,
-      ...(actor.handle === undefined ? {} : { handle: actor.handle }),
-      ...(blueskyProfile.displayName === undefined
-        ? {}
-        : { displayName: blueskyProfile.displayName }),
-      ...(avatar === undefined ? {} : { avatar }),
-    }
-  }
-
-  return {
-    did: actor.did,
-    ...(actor.handle === undefined ? {} : { handle: actor.handle }),
-  }
+  return { did }
 }
 
 export interface FeedViewContext {
@@ -224,13 +197,6 @@ const buildMeasurementView = (
   }
 }
 
-const buildHyperboardView = (
-  value: FeedRecordValue<'org.hyperboards.board'>,
-): HyperboardFeedView => ({
-  $type: 'org.hypercerts.feed.defs#hyperboardView',
-  createdAt: value.createdAt,
-})
-
 const buildUpdateView = (
   value: FeedRecordValue<'org.hypercerts.context.attachment'>,
 ): UpdateFeedView => {
@@ -273,8 +239,6 @@ export const buildFeedItemView = (
       return buildEvaluationView(record.value)
     case 'measurement.create':
       return buildMeasurementView(record.value)
-    case 'hyperboard.create':
-      return buildHyperboardView(record.value)
     case 'update.create':
       return buildUpdateView(record.value)
   }

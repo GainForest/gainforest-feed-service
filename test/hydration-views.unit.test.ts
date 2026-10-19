@@ -1,12 +1,3 @@
-import {
-  AppCertifiedBadgeAward,
-  OrgHyperboardsBoard,
-  OrgHypercertsClaimActivity,
-  OrgHypercertsCollection,
-  OrgHypercertsContextAttachment,
-  OrgHypercertsContextEvaluation,
-  OrgHypercertsContextMeasurement,
-} from '@hypercerts-org/lexicon'
 import { jsonToLex } from '@atproto/lex'
 import { describe, expect, it } from 'vitest'
 
@@ -86,20 +77,6 @@ const smallBlob = (
   },
 })
 
-const smallVideo = (
-  mimeType: string,
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> => ({
-  $type: 'org.hypercerts.defs#smallVideo',
-  video: {
-    $type: 'blob',
-    ref: { $link: blobCid },
-    mimeType,
-    size: 1_024,
-    ...overrides,
-  },
-})
-
 const protocolValue = (value: unknown): unknown =>
   jsonToLex(value as Parameters<typeof jsonToLex>[0], { strict: true })
 
@@ -126,11 +103,6 @@ const records = {
     metric: 'hectares restored',
     unit: 'ha',
     value: '42',
-    createdAt,
-  },
-  hyperboard: {
-    $type: 'org.hyperboards.board',
-    subject: strongRef(),
     createdAt,
   },
   update: {
@@ -169,27 +141,10 @@ const validated = (
 
 const endorsedActor: ActorSummary = {
   did: subjectDid,
-  handle: 'subject.example',
   displayName: 'Subject',
 }
 
 describe('top-level record validation', () => {
-  it('imports and executes every authoritative v1.0.0 validator', () => {
-    const cases = [
-      [OrgHypercertsClaimActivity, records.activity],
-      [OrgHypercertsCollection, records.collection],
-      [OrgHypercertsContextEvaluation, records.evaluation],
-      [OrgHypercertsContextMeasurement, records.measurement],
-      [OrgHyperboardsBoard, records.hyperboard],
-      [OrgHypercertsContextAttachment, records.update],
-      [AppCertifiedBadgeAward, records.endorsement],
-    ] as const
-
-    for (const [lexicon, value] of cases) {
-      expect(lexicon.validateRecord(value).success).toBe(true)
-    }
-  })
-
   it('accepts exactly the trusted collection and feed-kind matrix', () => {
     const cases: readonly [FeedKind, string, unknown][] = [
       ['cert.create', 'org.hypercerts.claim.activity', records.activity],
@@ -197,7 +152,6 @@ describe('top-level record validation', () => {
       ['project.created_with_cert', 'org.hypercerts.collection', records.collection],
       ['evaluation.create', 'org.hypercerts.context.evaluation', records.evaluation],
       ['measurement.create', 'org.hypercerts.context.measurement', records.measurement],
-      ['hyperboard.create', 'org.hyperboards.board', records.hyperboard],
       ['update.create', 'org.hypercerts.context.attachment', records.update],
       ['endorsement.award', 'app.certified.badge.award', records.endorsement],
     ]
@@ -263,11 +217,6 @@ describe('top-level record validation', () => {
         'measurement.create',
         'org.hypercerts.context.measurement',
         { ...records.measurement, metric: undefined },
-      ],
-      [
-        'hyperboard.create',
-        'org.hyperboards.board',
-        { ...records.hyperboard, subject: undefined },
       ],
       [
         'update.create',
@@ -362,7 +311,7 @@ describe('top-level record validation', () => {
     }
   })
 
-  it('rejects schema-invalid evaluation and Hyperboard media blobs', () => {
+  it('rejects schema-invalid evaluation media blobs', () => {
     const invalidCases: readonly [FeedKind, string, unknown][] = [
       [
         'evaluation.create',
@@ -374,53 +323,6 @@ describe('top-level record validation', () => {
           ],
         },
       ],
-      [
-        'hyperboard.create',
-        'org.hyperboards.board',
-        {
-          ...records.hyperboard,
-          config: { backgroundImage: smallImage({ mimeType: 'image/gif' }) },
-        },
-      ],
-      [
-        'hyperboard.create',
-        'org.hyperboards.board',
-        {
-          ...records.hyperboard,
-          contributorConfigs: [
-            {
-              contributor: strongRef(),
-              image: smallImage({ size: 5_242_881 }),
-            },
-          ],
-        },
-      ],
-      [
-        'hyperboard.create',
-        'org.hyperboards.board',
-        {
-          ...records.hyperboard,
-          contributorConfigs: [
-            {
-              contributor: strongRef(),
-              hoverImage: smallImage({ size: 1.5 }),
-            },
-          ],
-        },
-      ],
-      [
-        'hyperboard.create',
-        'org.hyperboards.board',
-        {
-          ...records.hyperboard,
-          contributorConfigs: [
-            {
-              contributor: strongRef(),
-              video: smallVideo('video/quicktime'),
-            },
-          ],
-        },
-      ],
     ]
 
     for (const [kind, collection, value] of invalidCases) {
@@ -428,7 +330,7 @@ describe('top-level record validation', () => {
     }
   })
 
-  it('accepts valid boundary and forward-compatible evaluation and Hyperboard media', () => {
+  it('accepts valid boundary and forward-compatible evaluation media', () => {
     expect(
       validateFeedRecord(
         'evaluation.create',
@@ -442,23 +344,6 @@ describe('top-level record validation', () => {
           ],
         },
       ),
-    ).toBeDefined()
-
-    expect(
-      validateFeedRecord('hyperboard.create', 'org.hyperboards.board', {
-        ...records.hyperboard,
-        config: {
-          backgroundImage: uriImage('https://example.com/background.png'),
-        },
-        contributorConfigs: [
-          {
-            contributor: strongRef(),
-            image: { $type: 'example.future#image', value: 'future' },
-            hoverImage: smallImage({ size: 5_242_880 }),
-            video: smallVideo('video/webm', { size: 20_971_520 }),
-          },
-        ],
-      }),
     ).toBeDefined()
   })
 
@@ -609,7 +494,7 @@ describe('feed-card view builders', () => {
     )
   })
 
-  it('returns exact targets for evaluation and measurement while keeping Hyperboard lean', () => {
+  it('returns exact targets for evaluation and measurement', () => {
     const evaluation = validated(
       'evaluation.create',
       'org.hypercerts.context.evaluation',
@@ -630,12 +515,6 @@ describe('feed-card view builders', () => {
         ],
       },
     )
-    const hyperboard = validated(
-      'hyperboard.create',
-      'org.hyperboards.board',
-      records.hyperboard,
-    )
-
     expect(buildFeedItemView(evaluation)).toEqual({
       $type: 'org.hypercerts.feed.defs#evaluationView',
       summary: 'Strong evidence',
@@ -648,21 +527,14 @@ describe('feed-card view builders', () => {
       createdAt,
       target: { uri: targetUri, cid },
     })
-    expect(buildFeedItemView(hyperboard)).toEqual({
-      $type: 'org.hypercerts.feed.defs#hyperboardView',
-      createdAt,
-    })
-
     for (const view of [
       buildFeedItemView(evaluation),
       buildFeedItemView(measurement),
-      buildFeedItemView(hyperboard),
     ]) {
       expect(view).not.toHaveProperty('subject')
       expect(view).not.toHaveProperty('subjects')
       expect(view).not.toHaveProperty('measurements')
     }
-    expect(buildFeedItemView(hyperboard)).not.toHaveProperty('target')
   })
 
   it('selects the first image blob for updates and ignores URIs and non-images', () => {
@@ -696,7 +568,7 @@ describe('feed-card view builders', () => {
     })
   })
 
-  it('maps all eight feed kinds exhaustively to the seven public view variants', () => {
+  it('maps all seven feed kinds exhaustively to the six public view variants', () => {
     const cases = {
       'cert.create': {
         collection: 'org.hypercerts.claim.activity',
@@ -722,11 +594,6 @@ describe('feed-card view builders', () => {
         collection: 'org.hypercerts.context.measurement',
         value: records.measurement,
         expectedType: 'org.hypercerts.feed.defs#measurementView',
-      },
-      'hyperboard.create': {
-        collection: 'org.hyperboards.board',
-        value: records.hyperboard,
-        expectedType: 'org.hypercerts.feed.defs#hyperboardView',
       },
       'update.create': {
         collection: 'org.hypercerts.context.attachment',

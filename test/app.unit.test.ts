@@ -446,7 +446,6 @@ describe('HTTP application', () => {
                 kind: 'cert.create' as const,
                 actor: {
                   did: actor,
-                  handle: 'actor.example',
                   avatar: {
                     $type: 'org.hypercerts.defs#smallImage' as const,
                     image: avatarBlob,

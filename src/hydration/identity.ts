@@ -9,27 +9,28 @@ const IDENTITY_QUERY = `
   )
   SELECT
     requested.did AS requested_did,
-    actor.did AS actor_did,
-    actor.handle,
-    certified_profile.json AS certified_profile_json,
-    bluesky_profile.json AS bluesky_profile_json
+    certified_profile.record AS certified_profile_json
   FROM requested
-  LEFT JOIN actor
-    ON actor.did = requested.did
-  LEFT JOIN record AS certified_profile
+  LEFT JOIN happyview_records AS certified_profile
     ON certified_profile.uri = 'at://' || requested.did || '/app.certified.actor.profile/self'
    AND certified_profile.collection = 'app.certified.actor.profile'
-  LEFT JOIN record AS bluesky_profile
-    ON bluesky_profile.uri = 'at://' || requested.did || '/app.bsky.actor.profile/self'
-   AND bluesky_profile.collection = 'app.bsky.actor.profile'
+   AND certified_profile.did = requested.did
 `
 
 interface IdentityQueryRow extends QueryResultRow {
   requested_did: string
-  actor_did: string | null
-  handle: string | null
   certified_profile_json: unknown
-  bluesky_profile_json: unknown
+}
+
+const parseCertifiedProfile = (value: unknown): unknown => {
+  if (value === null || value === undefined) return undefined
+  if (typeof value !== 'string') return value
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed === null ? undefined : parsed
+  } catch {
+    return undefined
+  }
 }
 
 /** Narrow structural query capability used by the identity adapter. */
@@ -40,7 +41,7 @@ export interface IdentityQueryExecutor {
   ): Promise<{ readonly rows: readonly T[] }>
 }
 
-/** Read-only PostgreSQL adapter for current actor, Certified, and Bluesky identity data. */
+/** Read-only PostgreSQL adapter for current HappyView Certified-profile data. */
 export class PostgresIdentityReader implements IdentityReader {
   constructor(private readonly database: IdentityQueryExecutor) {}
 
@@ -70,28 +71,10 @@ export class PostgresIdentityReader implements IdentityReader {
         )
       }
       seenDids.add(row.requested_did)
-      if (row.actor_did !== null && row.actor_did !== row.requested_did) {
-        throw new Error(
-          'Identity query returned actor data for a different DID; verify the actor join before serving hydrated pages.',
-        )
-      }
-
+      const certifiedProfile = parseCertifiedProfile(row.certified_profile_json)
       contexts.set(row.requested_did, {
         did: row.requested_did,
-        ...(row.actor_did === null
-          ? {}
-          : {
-              actor: {
-                did: row.actor_did,
-                handle: row.handle,
-              },
-            }),
-        ...(row.certified_profile_json === null
-          ? {}
-          : { certifiedProfile: row.certified_profile_json }),
-        ...(row.bluesky_profile_json === null
-          ? {}
-          : { blueskyProfile: row.bluesky_profile_json }),
+        ...(certifiedProfile === undefined ? {} : { certifiedProfile }),
       })
     }
 

@@ -55,6 +55,15 @@ const sourceInvariantError = (): Error =>
     'Hypercerts feed query source invariant failed: a selected source did not match the exact URI, CID, and collection of its feed row; verify the post-pagination source join before serving hydrated requests.',
   )
 
+const parseSourceRecord = (value: unknown): unknown => {
+  if (typeof value !== 'string') return value
+  try {
+    return JSON.parse(value) as unknown
+  } catch {
+    return undefined
+  }
+}
+
 const parseHypercertsFeedParams = (
   input: { readonly $type: string },
 ): HypercertsFeedParams => {
@@ -123,7 +132,7 @@ const mapHypercertsFeedRow: FeedRowMapper<
     throw sourceInvariantError()
   }
 
-  return { ...metadata, sourceValue: row.source_json }
+  return { ...metadata, sourceValue: parseSourceRecord(row.source_json) }
 }
 
 /** Builds the current Hypercerts feed definition over one read-only SQL runtime. */

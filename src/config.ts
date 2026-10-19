@@ -10,7 +10,7 @@ export interface Config {
   readonly metricsHost: string
   /** TCP port used by the optional metrics server, or undefined when disabled. */
   readonly metricsPort: number | undefined
-  /** Postgres connection URL for the indexer's existing database. */
+  /** Postgres connection URL for HappyView's existing database. */
   readonly databaseUrl: string
   /** Maximum number of Postgres sessions held by this sidecar. */
   readonly databaseMaxConnections: number
@@ -81,7 +81,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
   const databaseUrl = env.DATABASE_URL
   if (!databaseUrl) {
     throw new Error(
-      'DATABASE_URL is required; set it to the dedicated read-only Postgres connection URL for the indexer database.',
+      'DATABASE_URL is required; set it to the dedicated read-only Postgres connection URL for the HappyView database.',
     )
   }
   let parsedDatabaseUrl: URL

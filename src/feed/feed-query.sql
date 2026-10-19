@@ -1,75 +1,145 @@
 WITH
+timestamp_patterns AS NOT MATERIALIZED (
+  SELECT
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'::text AS rfc3339_timestamp_pattern,
+    '-00:00$'::text AS rfc3339_unknown_offset_suffix_pattern,
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2} ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-]([01][0-9]|2[0-3])(:[0-5][0-9](:[0-5][0-9])?)?$'::text AS postgres_timestamp_pattern,
+    '-00(:00(:00)?)?$'::text AS postgres_unknown_offset_suffix_pattern
+),
 -- =============================================================================
 -- Scope resolution
 -- Combine the viewer's current Certified follows with valid DID endorsements
--- from trusted evaluators, then apply Hyperindex organization-quality policy.
+-- from trusted evaluators, then apply HappyView's current label projection.
 -- =============================================================================
 base_authors AS (
-  SELECT follow.json->>'subject' AS did
-  FROM record AS follow
+  SELECT follow_json.value->>'subject' AS did
+  FROM happyview_records AS follow
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN pg_input_is_valid(follow.record, 'jsonb')
+        THEN follow.record::jsonb
+      ELSE NULL::jsonb
+    END AS value
+  ) AS follow_json
   WHERE follow.collection = 'app.certified.graph.follow'
     AND follow.did = $1
-    AND jsonb_typeof(follow.json->'subject') = 'string'
+    AND jsonb_typeof(follow_json.value->'subject') = 'string'
     -- Bound untrusted values and require the conservative DID shape accepted by
     -- this service before allowing them to expand the feed scope.
-    AND char_length(follow.json->>'subject') <= 2048
-    AND follow.json->>'subject' ~ '^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$'
+    AND char_length(follow_json.value->>'subject') <= 2048
+    AND follow_json.value->>'subject' ~ '^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$'
 ),
 -- This rule is shared by evaluator scope expansion and visible award events.
 -- NOT MATERIALIZED lets PostgreSQL push each consumer's DID/URI filters into it.
 valid_endorsement_awards AS NOT MATERIALIZED (
   SELECT
     award.*,
-    award.json->'subject'->>'did' AS endorsement_subject_did
-  FROM record AS award
-  JOIN record AS definition
+    award_json.value AS record_json,
+    award_json.value->'subject'->>'did' AS endorsement_subject_did
+  FROM happyview_records AS award
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN pg_input_is_valid(award.record, 'jsonb')
+        THEN award.record::jsonb
+      ELSE NULL::jsonb
+    END AS value
+  ) AS award_json
+  JOIN happyview_records AS definition
     -- Match the exact definition version referenced by the award.
-    ON definition.uri = award.json->'badge'->>'uri'
-   AND definition.cid = award.json->'badge'->>'cid'
+    ON definition.uri = award_json.value->'badge'->>'uri'
+   AND definition.cid = award_json.value->'badge'->>'cid'
    AND definition.collection = 'app.certified.badge.definition'
-   AND definition.json->>'badgeType' = 'endorsement'
-   AND (
-     -- Omitting allowedIssuers permits any issuer. When present, it must be an
-     -- array containing this issuer; malformed values deliberately match none.
-     NOT (definition.json ? 'allowedIssuers')
-     OR (
-       jsonb_typeof(definition.json->'allowedIssuers') = 'array'
-       AND EXISTS (
-         SELECT 1
-         FROM jsonb_array_elements_text(
-           CASE
-             WHEN jsonb_typeof(definition.json->'allowedIssuers') = 'array'
-               THEN definition.json->'allowedIssuers'
-             ELSE '[]'::jsonb
-           END
-         ) AS issuer(did)
-         WHERE issuer.did = award.did
-       )
-     )
-   )
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN pg_input_is_valid(definition.record, 'jsonb')
+        THEN definition.record::jsonb
+      ELSE NULL::jsonb
+    END AS value
+  ) AS definition_json
   WHERE award.collection = 'app.certified.badge.award'
+    AND definition_json.value->>'badgeType' = 'endorsement'
+    AND (
+      -- Omitting allowedIssuers permits any issuer. When present, it must be an
+      -- array containing this issuer; malformed values deliberately match none.
+      NOT (definition_json.value ? 'allowedIssuers')
+      OR (
+        jsonb_typeof(definition_json.value->'allowedIssuers') = 'array'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(
+            CASE
+              WHEN jsonb_typeof(definition_json.value->'allowedIssuers') = 'array'
+                THEN definition_json.value->'allowedIssuers'
+              ELSE '[]'::jsonb
+            END
+          ) AS issuer(did)
+          WHERE issuer.did = award.did
+        )
+      )
+    )
     -- Only account-target endorsements affect scope or appear as feed events.
-    AND jsonb_typeof(award.json->'subject') = 'object'
-    AND award.json->'subject'->>'$type' = 'app.certified.defs#did'
-    AND jsonb_typeof(award.json->'subject'->'did') = 'string'
-    AND char_length(award.json->'subject'->>'did') <= 2048
-    AND award.json->'subject'->>'did' ~ '^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$'
+    AND jsonb_typeof(award_json.value->'subject') = 'object'
+    AND award_json.value->'subject'->>'$type' = 'app.certified.defs#did'
+    AND jsonb_typeof(award_json.value->'subject'->'did') = 'string'
+    AND char_length(award_json.value->'subject'->>'did') <= 2048
+    AND award_json.value->'subject'->>'did' ~ '^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$'
     -- Self-endorsements neither expand scope nor produce feed events.
-    AND award.did <> award.json->'subject'->>'did'
+    AND award.did <> award_json.value->'subject'->>'did'
     AND COALESCE(
       (
-        SELECT response.json->>'response'
-        FROM record AS response
+        SELECT response_json.value->>'response'
+        FROM happyview_records AS response
+        CROSS JOIN timestamp_patterns AS timestamp_pattern
+        CROSS JOIN LATERAL (
+          SELECT CASE
+            WHEN pg_input_is_valid(response.record, 'jsonb')
+              THEN response.record::jsonb
+            ELSE NULL::jsonb
+          END AS value
+        ) AS response_json
+        CROSS JOIN LATERAL (
+          SELECT CASE
+            WHEN (
+              response.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
+              OR response.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
+            )
+              AND response.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
+              AND pg_input_is_valid(response.indexed_at, 'timestamp with time zone')
+              THEN CASE
+                WHEN isfinite(response.indexed_at::timestamptz)
+                  THEN response.indexed_at::timestamptz
+                ELSE NULL::timestamptz
+              END
+            ELSE NULL::timestamptz
+          END AS value
+        ) AS response_indexed_at
+        CROSS JOIN LATERAL (
+          SELECT COALESCE(
+            CASE
+              WHEN jsonb_typeof(response_json.value->'createdAt') = 'string'
+                AND response_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
+                AND response_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
+                AND pg_input_is_valid(
+                  response_json.value->>'createdAt',
+                  'timestamp with time zone'
+                )
+                THEN (response_json.value->>'createdAt')::timestamptz
+              ELSE NULL::timestamptz
+            END,
+            response_indexed_at.value
+          ) AS effective_at
+        ) AS response_time
         WHERE response.collection = 'app.certified.badge.response'
-          AND response.did = award.json->'subject'->>'did'
-          AND response.json->'badgeAward'->>'uri' = award.uri
-          AND response.json->'badgeAward'->>'cid' = award.cid
-          AND response.json->>'response' IS NOT NULL
-          AND response.json->>'response' <> ''
-        -- Responses are mutable current state; the latest non-empty response wins.
+          AND response.did = award_json.value->'subject'->>'did'
+          AND response_json.value->'badgeAward'->>'uri' = award.uri
+          AND response_json.value->'badgeAward'->>'cid' = award.cid
+          AND response_json.value->>'response' IS NOT NULL
+          AND response_json.value->>'response' <> ''
+          AND response_time.effective_at IS NOT NULL
+        -- Compare validated timestamp values, never the stored text lexically.
         ORDER BY
-          COALESCE(response.record_created_at, response.indexed_at) DESC,
-          response.indexed_at DESC,
+          response_time.effective_at DESC,
+          response_indexed_at.value DESC NULLS LAST,
           response.uri DESC
         LIMIT 1
       ),
@@ -91,56 +161,40 @@ requested_scope AS (
   WHERE candidate.did IS NOT NULL
     AND candidate.did <> $1
 ),
--- Hyperindex stores external label timestamps as text. Every cast remains inside
--- a CASE guard so malformed rows are ignored instead of failing the feed query.
-parsed_quality_labels AS MATERIALIZED (
-  SELECT
-    scoped.did,
-    label.src,
-    label.uri,
-    label.val,
-    label.neg,
-    label.exp,
-    CASE
-      WHEN pg_input_is_valid(label.cts, 'timestamp with time zone')
-        THEN label.cts::timestamptz
-      ELSE NULL
-    END AS cts_at,
-    CASE
-      WHEN label.exp IS NULL THEN NULL
-      WHEN pg_input_is_valid(label.exp, 'timestamp with time zone')
-        THEN label.exp::timestamptz
-      ELSE NULL
-    END AS exp_at,
-    pg_input_is_valid(label.cts, 'timestamp with time zone')
-      AND (
-        label.exp IS NULL
-        OR pg_input_is_valid(label.exp, 'timestamp with time zone')
-      ) AS timestamps_valid
-  FROM requested_scope AS scoped
-  JOIN external_label AS label
-    ON label.uri = scoped.did
-   AND label.cid IS NULL
-   AND label.src = ANY($6::text[])
-   AND label.val = ANY(ARRAY['high-quality', 'standard', 'draft', 'likely-test']::text[])
-),
+-- HappyView stores only the current positive label projection. Its timestamps
+-- are TEXT; validate their shape and finiteness before any timestamp cast.
 active_quality_labels AS (
-  SELECT asserted.did, asserted.val
-  FROM parsed_quality_labels AS asserted
-  WHERE asserted.timestamps_valid
-    AND asserted.neg = false
-    AND (asserted.exp IS NULL OR asserted.exp_at > NOW())
-    AND NOT EXISTS (
-      SELECT 1
-      FROM parsed_quality_labels AS negation
-      WHERE negation.uri = asserted.uri
-        AND negation.src = asserted.src
-        AND negation.val = asserted.val
-        AND negation.timestamps_valid
-        AND negation.neg = true
-        AND (negation.exp IS NULL OR negation.exp_at > NOW())
-        AND negation.cts_at >= asserted.cts_at
+  SELECT scoped.did, label.val
+  FROM requested_scope AS scoped
+  JOIN happyview_labels AS label
+    ON label.uri = scoped.did
+  CROSS JOIN timestamp_patterns AS timestamp_pattern
+  WHERE label.src = ANY($6::text[])
+    AND label.val = ANY(
+      ARRAY['high-quality', 'standard', 'draft', 'likely-test']::text[]
     )
+    AND CASE
+      WHEN (
+        label.cts ~ timestamp_pattern.rfc3339_timestamp_pattern
+        OR label.cts ~ timestamp_pattern.postgres_timestamp_pattern
+      )
+        AND label.cts !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
+        AND pg_input_is_valid(label.cts, 'timestamp with time zone')
+        THEN isfinite(label.cts::timestamptz)
+      ELSE false
+    END
+    AND CASE
+      WHEN label.exp IS NULL THEN true
+      WHEN (
+        label.exp ~ timestamp_pattern.rfc3339_timestamp_pattern
+        OR label.exp ~ timestamp_pattern.postgres_timestamp_pattern
+      )
+        AND label.exp !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
+        AND pg_input_is_valid(label.exp, 'timestamp with time zone')
+        THEN isfinite(label.exp::timestamptz)
+          AND label.exp::timestamptz > NOW()
+      ELSE false
+    END
 ),
 quality_summary AS (
   SELECT
@@ -156,7 +210,7 @@ final_scope AS (
   WHERE NOT $3::boolean
      OR NOT EXISTS (
        SELECT 1
-       FROM record AS organization
+       FROM happyview_records AS organization
        WHERE organization.uri =
          'at://' || scoped.did || '/app.certified.actor.organization/self'
          AND organization.collection = 'app.certified.actor.organization'
@@ -177,28 +231,107 @@ resolved_scope AS MATERIALIZED (
 project_pairs AS (
   SELECT DISTINCT collection_record.uri AS collection_uri, activity.uri AS activity_uri
   FROM resolved_scope AS scoped
-  JOIN record AS collection_record
+  JOIN happyview_records AS collection_record
     ON collection_record.did = scoped.did
    AND collection_record.collection = 'org.hypercerts.collection'
+  CROSS JOIN timestamp_patterns AS timestamp_pattern
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN pg_input_is_valid(collection_record.record, 'jsonb')
+        THEN collection_record.record::jsonb
+      ELSE NULL::jsonb
+    END AS value
+  ) AS collection_json
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN (
+        collection_record.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
+        OR collection_record.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
+      )
+        AND collection_record.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
+        AND pg_input_is_valid(collection_record.indexed_at, 'timestamp with time zone')
+        THEN CASE
+          WHEN isfinite(collection_record.indexed_at::timestamptz)
+            THEN collection_record.indexed_at::timestamptz
+          ELSE NULL::timestamptz
+        END
+      ELSE NULL::timestamptz
+    END AS value
+  ) AS collection_indexed_at
+  CROSS JOIN LATERAL (
+    SELECT COALESCE(
+      CASE
+        WHEN jsonb_typeof(collection_json.value->'createdAt') = 'string'
+          AND collection_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
+          AND collection_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
+          AND pg_input_is_valid(
+            collection_json.value->>'createdAt',
+            'timestamp with time zone'
+          )
+          THEN (collection_json.value->>'createdAt')::timestamptz
+        ELSE NULL::timestamptz
+      END,
+      collection_indexed_at.value
+    ) AS effective_at
+  ) AS collection_time
   CROSS JOIN LATERAL jsonb_array_elements(
     CASE
-      WHEN jsonb_typeof(collection_record.json->'items') = 'array'
-        THEN collection_record.json->'items'
+      WHEN jsonb_typeof(collection_json.value->'items') = 'array'
+        THEN collection_json.value->'items'
       ELSE '[]'::jsonb
     END
   ) AS item
-  JOIN record AS activity
+  JOIN happyview_records AS activity
     ON activity.uri = item->'itemIdentifier'->>'uri'
    AND activity.cid = item->'itemIdentifier'->>'cid'
    AND activity.collection = 'org.hypercerts.claim.activity'
    AND activity.did = collection_record.did
-   AND ABS(EXTRACT(EPOCH FROM (
-     COALESCE(activity.record_created_at, activity.indexed_at)
-       - COALESCE(
-         collection_record.record_created_at,
-         collection_record.indexed_at
-       )
-   ))) < 60
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN pg_input_is_valid(activity.record, 'jsonb')
+        THEN activity.record::jsonb
+      ELSE NULL::jsonb
+    END AS value
+  ) AS activity_json
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN (
+        activity.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
+        OR activity.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
+      )
+        AND activity.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
+        AND pg_input_is_valid(activity.indexed_at, 'timestamp with time zone')
+        THEN CASE
+          WHEN isfinite(activity.indexed_at::timestamptz)
+            THEN activity.indexed_at::timestamptz
+          ELSE NULL::timestamptz
+        END
+      ELSE NULL::timestamptz
+    END AS value
+  ) AS activity_indexed_at
+  CROSS JOIN LATERAL (
+    SELECT COALESCE(
+      CASE
+        WHEN jsonb_typeof(activity_json.value->'createdAt') = 'string'
+          AND activity_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
+          AND activity_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
+          AND pg_input_is_valid(
+            activity_json.value->>'createdAt',
+            'timestamp with time zone'
+          )
+          THEN (activity_json.value->>'createdAt')::timestamptz
+        ELSE NULL::timestamptz
+      END,
+      activity_indexed_at.value
+    ) AS effective_at
+  ) AS activity_time
+  WHERE collection_json.value IS NOT NULL
+    AND activity_json.value IS NOT NULL
+    AND collection_time.effective_at IS NOT NULL
+    AND activity_time.effective_at IS NOT NULL
+    AND ABS(EXTRACT(EPOCH FROM (
+      activity_time.effective_at - collection_time.effective_at
+    ))) < 60
 ),
 paired_collections AS (
   SELECT DISTINCT collection_uri AS uri FROM project_pairs
@@ -212,10 +345,57 @@ paired_activities AS (
 -- update attachments, and enforce the shared endorsement policy.
 -- =============================================================================
 eligible_records AS (
-  SELECT source.*
+  SELECT
+    source.uri,
+    source.cid,
+    source.collection,
+    source.did,
+    source_time.effective_at
   FROM resolved_scope AS scoped
-  JOIN record AS source ON source.did = scoped.did
-  WHERE source.collection = ANY($11::text[])
+  JOIN happyview_records AS source
+    ON source.did = scoped.did
+   AND source.collection = ANY($11::text[])
+  CROSS JOIN timestamp_patterns AS timestamp_pattern
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN pg_input_is_valid(source.record, 'jsonb')
+        THEN source.record::jsonb
+      ELSE NULL::jsonb
+    END AS value
+  ) AS source_json
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN (
+        source.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
+        OR source.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
+      )
+        AND source.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
+        AND pg_input_is_valid(source.indexed_at, 'timestamp with time zone')
+        THEN CASE
+          WHEN isfinite(source.indexed_at::timestamptz)
+            THEN source.indexed_at::timestamptz
+          ELSE NULL::timestamptz
+        END
+      ELSE NULL::timestamptz
+    END AS value
+  ) AS source_indexed_at
+  CROSS JOIN LATERAL (
+    SELECT COALESCE(
+      CASE
+        WHEN jsonb_typeof(source_json.value->'createdAt') = 'string'
+          AND source_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
+          AND source_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
+          AND pg_input_is_valid(
+            source_json.value->>'createdAt',
+            'timestamp with time zone'
+          )
+          THEN (source_json.value->>'createdAt')::timestamptz
+        ELSE NULL::timestamptz
+      END,
+      source_indexed_at.value
+    ) AS effective_at
+  ) AS source_time
+  WHERE source_time.effective_at IS NOT NULL
     AND (
       source.collection <> 'org.hypercerts.claim.activity'
       OR NOT EXISTS (
@@ -224,7 +404,7 @@ eligible_records AS (
     )
     AND (
       source.collection <> 'org.hypercerts.context.attachment'
-      OR source.json->>'contentType' = 'update'
+      OR source_json.value->>'contentType' = 'update'
     )
     AND (
       source.collection <> 'app.certified.badge.award'
@@ -258,11 +438,10 @@ classified_events AS (
         END
       WHEN 'org.hypercerts.context.evaluation' THEN 'evaluation.create'
       WHEN 'org.hypercerts.context.measurement' THEN 'measurement.create'
-      WHEN 'org.hyperboards.board' THEN 'hyperboard.create'
       WHEN 'org.hypercerts.context.attachment' THEN 'update.create'
       WHEN 'app.certified.badge.award' THEN 'endorsement.award'
     END AS kind,
-    COALESCE(source.record_created_at, source.indexed_at) AS effective_at
+    source.effective_at
   FROM eligible_records AS source
 ),
 filtered_events AS (
@@ -295,10 +474,11 @@ SELECT
   selected_source.uri AS selected_source_uri,
   selected_source.cid AS selected_source_cid,
   selected_source.collection AS selected_source_collection,
-  selected_source.json AS source_json
+  selected_source.record AS source_json
 FROM paged_events AS page
-LEFT JOIN record AS selected_source
+LEFT JOIN happyview_records AS selected_source
   ON $12::boolean
  AND selected_source.uri = page.uri
  AND selected_source.cid = page.cid
+ AND selected_source.collection = page.collection
 ORDER BY page.effective_at DESC, page.uri DESC
