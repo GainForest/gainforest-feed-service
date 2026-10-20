@@ -34,8 +34,7 @@ export interface SqlFeedRuntime<Row extends QueryResultRow> {
 
 const hasSourceValue = <Row extends InternalFeedRow>(
   row: Row | (Row & InternalSourceFeedRow),
-): row is Row & InternalSourceFeedRow =>
-  Object.hasOwn(row, 'sourceValue')
+): row is Row & InternalSourceFeedRow => Object.hasOwn(row, 'sourceValue')
 
 export type FeedRowMapper<DatabaseRow, FeedRow extends InternalFeedRow> = (
   row: DatabaseRow,
