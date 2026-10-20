@@ -14,10 +14,7 @@ import {
   type GetFeedSkeletonInput,
 } from '../src/feed/types.js'
 import { HydratedFeedService } from '../src/hydration/service.js'
-import type {
-  ActorContext,
-  IdentityReader,
-} from '../src/hydration/types.js'
+import type { ActorContext, IdentityReader } from '../src/hydration/types.js'
 
 const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const authorDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
@@ -38,7 +35,8 @@ const targetUri = `at://${targetDid}/org.hypercerts.claim.activity/target`
 
 type FeedRequestOverrides = Partial<
   Omit<HypercertsFeedParams, '$type' | 'viewerDid'>
-> & Pick<GetFeedSkeletonInput, 'limit' | 'cursor'>
+> &
+  Pick<GetFeedSkeletonInput, 'limit' | 'cursor'>
 
 const feedRequest = (
   overrides: FeedRequestOverrides = {},
@@ -97,13 +95,14 @@ class FakePages implements FeedPageLoader {
     input: GetFeedSkeletonInput,
     mode: FeedPageMode,
   ): Promise<
-    | InternalFeedPage<InternalFeedRow>
-    | InternalFeedPage<InternalSourceFeedRow>
+    InternalFeedPage<InternalFeedRow> | InternalFeedPage<InternalSourceFeedRow>
   > {
     this.calls.push({ input, mode })
     if (this.failure) throw this.failure
     if (mode !== 'with-source') {
-      throw new Error('This hydrated-service fake supports source-aware pages only.')
+      throw new Error(
+        'This hydrated-service fake supports source-aware pages only.',
+      )
     }
     return this.page
   }
@@ -262,9 +261,7 @@ describe('HydratedFeedService', () => {
         }),
       ],
     })
-    const identities = new FakeIdentities(
-      new Map([[authorDid, authorContext]]),
-    )
+    const identities = new FakeIdentities(new Map([[authorDid, authorContext]]))
     const service = new HydratedFeedService(pages, identities)
 
     const output = await service.getFeed(feedRequest())

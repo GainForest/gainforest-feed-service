@@ -22,7 +22,8 @@ export const registerGetFeedSkeleton = (
     logger,
     auth,
     execute: (input) => feedService.getFeedSkeleton(input),
-    parseOutput: (output: GetFeedSkeletonOutput) => $output.schema.$parse(output),
+    parseOutput: (output: GetFeedSkeletonOutput) =>
+      $output.schema.$parse(output),
     errorLog: 'feed skeleton generation failed',
   })
 }

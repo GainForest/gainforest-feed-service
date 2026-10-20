@@ -1,5 +1,10 @@
 import type { Logger } from 'pino'
-import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from 'pg'
+import {
+  Pool,
+  type PoolConfig,
+  type QueryResult,
+  type QueryResultRow,
+} from 'pg'
 
 import type { Config } from './config.js'
 
@@ -68,19 +73,22 @@ export class Database implements DatabaseCompatibilityChecker {
       if (!capability || capability.server_version_num < 160000) {
         return {
           compatible: false,
-          reason: 'Postgres 16 or newer is required for safe parsing of HappyView JSON and timestamp text; upgrade the database before starting this service.',
+          reason:
+            'Postgres 16 or newer is required for safe parsing of HappyView JSON and timestamp text; upgrade the database before starting this service.',
         }
       }
       if (!capability.json_validation || !capability.timestamp_validation) {
         return {
           compatible: false,
-          reason: 'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
+          reason:
+            'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
         }
       }
       if (capability.transaction_read_only !== 'on') {
         return {
           compatible: false,
-          reason: 'The feed database session is not read-only; keep default_transaction_read_only enabled and use a read-only database role.',
+          reason:
+            'The feed database session is not read-only; keep default_transaction_read_only enabled and use a read-only database role.',
         }
       }
 
@@ -95,7 +103,8 @@ export class Database implements DatabaseCompatibilityChecker {
       ) {
         return {
           compatible: false,
-          reason: 'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
+          reason:
+            'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
         }
       }
       return {

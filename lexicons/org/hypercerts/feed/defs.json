@@ -73,13 +73,14 @@
       "description": "A feed actor's DID and, when meaningful, validated Certified-profile display fields.",
       "properties": {
         "did": { "type": "string", "format": "did" },
-        "displayName": { "type": "string", "maxLength": 640, "maxGraphemes": 64 },
+        "displayName": {
+          "type": "string",
+          "maxLength": 640,
+          "maxGraphemes": 64
+        },
         "avatar": {
           "type": "union",
-          "refs": [
-            "org.hypercerts.defs#uri",
-            "org.hypercerts.defs#smallImage"
-          ]
+          "refs": ["org.hypercerts.defs#uri", "org.hypercerts.defs#smallImage"]
         }
       }
     },
@@ -91,10 +92,7 @@
         "shortDescription": { "type": "string" },
         "image": {
           "type": "union",
-          "refs": [
-            "org.hypercerts.defs#uri",
-            "org.hypercerts.defs#smallImage"
-          ]
+          "refs": ["org.hypercerts.defs#uri", "org.hypercerts.defs#smallImage"]
         },
         "createdAt": { "type": "string", "format": "datetime" },
         "startDate": { "type": "string", "format": "datetime" },
@@ -152,10 +150,7 @@
         "shortDescription": { "type": "string" },
         "image": {
           "type": "union",
-          "refs": [
-            "org.hypercerts.defs#uri",
-            "org.hypercerts.defs#smallBlob"
-          ]
+          "refs": ["org.hypercerts.defs#uri", "org.hypercerts.defs#smallBlob"]
         },
         "createdAt": { "type": "string", "format": "datetime" },
         "target": { "type": "ref", "ref": "com.atproto.repo.strongRef" }

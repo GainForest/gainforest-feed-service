@@ -51,7 +51,9 @@ describe('feed request validation', () => {
       (_, index) => `did:plc:${index.toString(36).padStart(24, 'a')}`,
     )
     expect(() =>
-      normalizeFeedRequest(feedParams({ viewerDid: viewer, trustedEvaluators })),
+      normalizeFeedRequest(
+        feedParams({ viewerDid: viewer, trustedEvaluators }),
+      ),
     ).toThrowError(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidRequest,
@@ -101,10 +103,7 @@ describe('feed request validation', () => {
       }),
     )
     expect(() =>
-      normalizeFeedRequest(
-        feedParams({ viewerDid: viewer }),
-        { limit: 51 },
-      ),
+      normalizeFeedRequest(feedParams({ viewerDid: viewer }), { limit: 51 }),
     ).toThrowError(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidRequest,

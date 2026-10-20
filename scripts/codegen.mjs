@@ -1,13 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
-import {
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,7 +15,9 @@ const stagingRoot = await mkdtemp(join(tmpdir(), 'hypercerts-feed-lexicons-'))
 const stagedLexicons = join(stagingRoot, 'lexicons')
 
 try {
-  await cp(join(repositoryRoot, 'lexicons'), stagedLexicons, { recursive: true })
+  await cp(join(repositoryRoot, 'lexicons'), stagedLexicons, {
+    recursive: true,
+  })
 
   // lex build resolves refs from one directory. Stage only the exact published
   // Hypercerts definitions referenced by the feed wire contract.
@@ -32,12 +27,7 @@ try {
       'utf8',
     ),
   )
-  const requiredHypercertDefs = [
-    'uri',
-    'smallBlob',
-    'smallImage',
-    'largeImage',
-  ]
+  const requiredHypercertDefs = ['uri', 'smallBlob', 'smallImage', 'largeImage']
   if (
     hypercertsDefs.lexicon !== 1 ||
     hypercertsDefs.id !== 'org.hypercerts.defs' ||
@@ -58,7 +48,10 @@ try {
         lexicon: hypercertsDefs.lexicon,
         id: hypercertsDefs.id,
         defs: Object.fromEntries(
-          requiredHypercertDefs.map((name) => [name, hypercertsDefs.defs[name]]),
+          requiredHypercertDefs.map((name) => [
+            name,
+            hypercertsDefs.defs[name],
+          ]),
         ),
       },
       null,

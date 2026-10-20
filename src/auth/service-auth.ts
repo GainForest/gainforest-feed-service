@@ -31,11 +31,9 @@ const replayChallenge = {
 const textEncoder = new TextEncoder()
 
 const expiredTokenError = (): LexServerAuthError =>
-  new LexServerAuthError(
-    'AuthenticationRequired',
-    'JWT token expired',
-    { Bearer: { error: 'JwtExpired' } },
-  )
+  new LexServerAuthError('AuthenticationRequired', 'JWT token expired', {
+    Bearer: { error: 'JwtExpired' },
+  })
 
 type VerifiedServiceAuthPayload = ServiceAuthCredentials['jwt']['payload'] & {
   readonly jti?: unknown

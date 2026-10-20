@@ -57,7 +57,8 @@ describe('release workflow', () => {
 
   test('allows omission and validates Changeset fragments when present', () => {
     expect(ciWorkflow).toMatch(/^  workflow_dispatch:/m)
-    expect(workflowStep(ciWorkflow, 'Validate changesets when present')).toBe(`      - name: Validate changesets when present
+    expect(workflowStep(ciWorkflow, 'Validate changesets when present'))
+      .toBe(`      - name: Validate changesets when present
         if: github.event_name == 'pull_request'
         env:
           BASE_SHA: \${{ github.event.pull_request.base.sha }}
@@ -75,9 +76,13 @@ describe('release workflow', () => {
   test('uses the repository token to create an approval-gated Release pull request', () => {
     expect(releaseWorkflow).toContain('branches: [main]')
     expect(releaseWorkflow).toContain('changesets/action/version@')
-    expect(releaseWorkflow).toContain('github-token: ${{ secrets.GITHUB_TOKEN }}')
-    expect(releaseWorkflow).toContain("pr-base-branch: main")
-    expect(releaseWorkflow).toContain("github.event.pull_request.head.ref == 'changeset-release/main'")
+    expect(releaseWorkflow).toContain(
+      'github-token: ${{ secrets.GITHUB_TOKEN }}',
+    )
+    expect(releaseWorkflow).toContain('pr-base-branch: main')
+    expect(releaseWorkflow).toContain(
+      "github.event.pull_request.head.ref == 'changeset-release/main'",
+    )
     expect(releaseWorkflow).toContain(
       'github.event.pull_request.head.repo.full_name == github.repository',
     )

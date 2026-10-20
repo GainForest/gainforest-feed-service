@@ -118,11 +118,11 @@ export const isMeaningfulCertifiedProfile = (
 ): boolean =>
   Boolean(
     profile.displayName ||
-      profile.description ||
-      profile.avatar ||
-      profile.banner ||
-      profile.pronouns ||
-      profile.website,
+    profile.description ||
+    profile.avatar ||
+    profile.banner ||
+    profile.pronouns ||
+    profile.website,
   )
 
 export type ValidatedFeedRecord =
@@ -173,10 +173,7 @@ const hasAccountSubject = (value: AppCertifiedBadgeAward.Record): boolean =>
 
 type ValidatedFeedRecordFor<
   Collection extends ValidatedFeedRecord['collection'],
-> = Extract<
-  ValidatedFeedRecord,
-  { readonly collection: Collection }
->
+> = Extract<ValidatedFeedRecord, { readonly collection: Collection }>
 
 const validateActivityRecord = (
   kind: FeedKind,
@@ -209,10 +206,7 @@ const validateCollectionRecord = (
   rawValue: unknown,
   parsedValue: unknown,
 ): ValidatedFeedRecordFor<'org.hypercerts.collection'> | undefined => {
-  if (
-    kind !== 'collection.create' &&
-    kind !== 'project.created_with_cert'
-  ) {
+  if (kind !== 'collection.create' && kind !== 'project.created_with_cert') {
     return undefined
   }
 

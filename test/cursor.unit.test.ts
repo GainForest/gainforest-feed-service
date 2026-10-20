@@ -87,9 +87,7 @@ describe('feed cursor', () => {
       JSON.stringify({ version: 1, feedId, value: 'not-a-position' }),
     ).toString('base64url'),
   ])('rejects malformed or unsupported cursor %s', (cursor) => {
-    expect(() =>
-      decodeCursor(feedId, cursor, timestampUriCursor),
-    ).toThrowError(
+    expect(() => decodeCursor(feedId, cursor, timestampUriCursor)).toThrowError(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidCursor,
       }),

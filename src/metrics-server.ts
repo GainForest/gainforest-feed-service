@@ -66,10 +66,7 @@ export const createMetricsServer = (
   const server = createServer((request, response) => {
     let pathname: string
     try {
-      pathname = new URL(
-        request.url ?? '/',
-        'http://metrics.internal',
-      ).pathname
+      pathname = new URL(request.url ?? '/', 'http://metrics.internal').pathname
     } catch {
       textResponse(response, 400, 'Bad Request\n')
       return

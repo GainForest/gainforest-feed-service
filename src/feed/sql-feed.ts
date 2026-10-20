@@ -32,10 +32,7 @@ export interface SqlFeedRuntime {
   readonly metrics: Metrics
 }
 
-export type FeedRowMapper<
-  DatabaseRow,
-  FeedRow extends InternalFeedRow,
-> = (
+export type FeedRowMapper<DatabaseRow, FeedRow extends InternalFeedRow> = (
   row: DatabaseRow,
   mode: FeedPageMode,
 ) => FeedRow | (FeedRow & InternalSourceFeedRow)
@@ -103,11 +100,7 @@ export const defineSqlFeed = <
       rows: page,
       ...(hasNext && last
         ? {
-            cursor: encodeCursor(
-              definition.id,
-              last,
-              definition.cursor,
-            ),
+            cursor: encodeCursor(definition.id, last, definition.cursor),
           }
         : {}),
     }
@@ -159,10 +152,7 @@ export const defineSqlFeed = <
     const startedAt = performance.now()
     let result: { readonly rows: readonly DatabaseRow[] }
     try {
-      result = await runtime.database.query<DatabaseRow>(
-        definition.sql,
-        values,
-      )
+      result = await runtime.database.query<DatabaseRow>(definition.sql, values)
     } finally {
       runtime.metrics.observeDatabase(
         'feed',
@@ -171,9 +161,7 @@ export const defineSqlFeed = <
     }
 
     if (mode === 'metadata') {
-      const rows = result.rows.map((row) =>
-        definition.mapRow(row, 'metadata'),
-      )
+      const rows = result.rows.map((row) => definition.mapRow(row, 'metadata'))
       return finishPage(rows, normalized, fetchLimit)
     }
 

@@ -44,33 +44,32 @@ const signedJwt = async (
 
 const resolverForMany = (
   ...entries: readonly (readonly [string, P256Keypair])[]
-): DidResolver<any> => ({
-  resolve: async (did: string) => {
-    const entry = entries.find(([entryDid]) => entryDid === did)
-    if (entry === undefined) throw new Error('unknown test issuer')
+): DidResolver<any> =>
+  ({
+    resolve: async (did: string) => {
+      const entry = entries.find(([entryDid]) => entryDid === did)
+      if (entry === undefined) throw new Error('unknown test issuer')
 
-    const [resolvedDid, keypair] = entry
-    return {
-      id: resolvedDid,
-      verificationMethod: [
-        {
-          id: `${resolvedDid}#atproto`,
-          type: 'EcdsaSecp256r1VerificationKey2019',
-          controller: resolvedDid,
-          publicKeyMultibase: bytesToMultibase(
-            keypair.publicKeyBytes(),
-            'base58btc',
-          ),
-        },
-      ],
-    }
-  },
-}) as unknown as DidResolver<any>
+      const [resolvedDid, keypair] = entry
+      return {
+        id: resolvedDid,
+        verificationMethod: [
+          {
+            id: `${resolvedDid}#atproto`,
+            type: 'EcdsaSecp256r1VerificationKey2019',
+            controller: resolvedDid,
+            publicKeyMultibase: bytesToMultibase(
+              keypair.publicKeyBytes(),
+              'base58btc',
+            ),
+          },
+        ],
+      }
+    },
+  }) as unknown as DidResolver<any>
 
-const resolverFor = (
-  keypair: P256Keypair,
-  did = issuerDid,
-): DidResolver<any> => resolverForMany([did, keypair])
+const resolverFor = (keypair: P256Keypair, did = issuerDid): DidResolver<any> =>
+  resolverForMany([did, keypair])
 
 const authRequest = (authorization: string | undefined): Request =>
   new Request('http://localhost/xrpc/test', {
@@ -105,18 +104,34 @@ describe('optional AT Protocol service authentication', () => {
     })
     const token = await signedJwt(keypair)
 
-    await expect(
-      auth(authContext(`Bearer ${token}`)),
-    ).resolves.toMatchObject({ did: issuerDid })
+    await expect(auth(authContext(`Bearer ${token}`))).resolves.toMatchObject({
+      did: issuerDid,
+    })
   })
 
   it.each([
     ['wrong signature', async () => signedJwt(await P256Keypair.create())],
-    ['expired token', async (keypair: P256Keypair) => signedJwt(keypair, { exp: now() - 1 })],
-    ['not-yet-valid token', async (keypair: P256Keypair) => signedJwt(keypair, { nbf: now() + 60 })],
-    ['wrong audience', async (keypair: P256Keypair) => signedJwt(keypair, { aud: 'did:web:other.example' })],
-    ['missing lxm', async (keypair: P256Keypair) => signedJwt(keypair, { lxm: undefined })],
-    ['wrong lxm', async (keypair: P256Keypair) => signedJwt(keypair, { lxm: hydratedNsid })],
+    [
+      'expired token',
+      async (keypair: P256Keypair) => signedJwt(keypair, { exp: now() - 1 }),
+    ],
+    [
+      'not-yet-valid token',
+      async (keypair: P256Keypair) => signedJwt(keypair, { nbf: now() + 60 }),
+    ],
+    [
+      'wrong audience',
+      async (keypair: P256Keypair) =>
+        signedJwt(keypair, { aud: 'did:web:other.example' }),
+    ],
+    [
+      'missing lxm',
+      async (keypair: P256Keypair) => signedJwt(keypair, { lxm: undefined }),
+    ],
+    [
+      'wrong lxm',
+      async (keypair: P256Keypair) => signedJwt(keypair, { lxm: hydratedNsid }),
+    ],
   ])('rejects %s without anonymous fallback', async (label, makeToken) => {
     const keypair = await P256Keypair.create()
     const auth = createOptionalServiceAuth({
@@ -222,13 +237,19 @@ describe('optional AT Protocol service authentication', () => {
       jti: 'shared-jti',
     })
 
-    await expect(auth(authContext(`Bearer ${firstToken}`))).resolves.toMatchObject({
+    await expect(
+      auth(authContext(`Bearer ${firstToken}`)),
+    ).resolves.toMatchObject({
       did: issuerDid,
     })
-    await expect(auth(authContext(`Bearer ${secondToken}`))).resolves.toMatchObject({
+    await expect(
+      auth(authContext(`Bearer ${secondToken}`)),
+    ).resolves.toMatchObject({
       did: otherIssuerDid,
     })
-    await expect(auth(authContext(`Bearer ${firstToken}`))).rejects.toMatchObject({
+    await expect(
+      auth(authContext(`Bearer ${firstToken}`)),
+    ).rejects.toMatchObject({
       wwwAuthenticate: { Bearer: { error: 'NonceNotUnique' } },
     })
   })
@@ -256,7 +277,9 @@ describe('optional AT Protocol service authentication', () => {
       )
 
       for (const token of firstTokens.slice(0, 512)) {
-        await expect(auth(authContext(`Bearer ${token}`))).resolves.toMatchObject({
+        await expect(
+          auth(authContext(`Bearer ${token}`)),
+        ).resolves.toMatchObject({
           did: issuerDid,
         })
       }
@@ -277,7 +300,9 @@ describe('optional AT Protocol service authentication', () => {
         ),
       )
       for (const token of secondTokens) {
-        await expect(auth(authContext(`Bearer ${token}`))).resolves.toMatchObject({
+        await expect(
+          auth(authContext(`Bearer ${token}`)),
+        ).resolves.toMatchObject({
           did: otherIssuerDid,
         })
       }
@@ -304,10 +329,14 @@ describe('optional AT Protocol service authentication', () => {
     const forgedToken = await signedJwt(forgedKeypair, { jti: 'forged-jti' })
     const validToken = await signedJwt(keypair, { jti: 'forged-jti' })
 
-    await expect(auth(authContext(`Bearer ${forgedToken}`))).rejects.toMatchObject({
+    await expect(
+      auth(authContext(`Bearer ${forgedToken}`)),
+    ).rejects.toMatchObject({
       wwwAuthenticate: { Bearer: { error: 'BadJwtSignature' } },
     })
-    await expect(auth(authContext(`Bearer ${validToken}`))).resolves.toMatchObject({
+    await expect(
+      auth(authContext(`Bearer ${validToken}`)),
+    ).resolves.toMatchObject({
       did: issuerDid,
     })
   })
@@ -327,10 +356,12 @@ describe('optional AT Protocol service authentication', () => {
     })
     const validToken = await signedJwt(keypair, { jti: 'endpoint-jti' })
 
-    await expect(auth(authContext(`Bearer ${invalidToken}`))).rejects.toBeInstanceOf(
-      LexServerAuthError,
-    )
-    await expect(auth(authContext(`Bearer ${validToken}`))).resolves.toMatchObject({
+    await expect(
+      auth(authContext(`Bearer ${invalidToken}`)),
+    ).rejects.toBeInstanceOf(LexServerAuthError)
+    await expect(
+      auth(authContext(`Bearer ${validToken}`)),
+    ).resolves.toMatchObject({
       did: issuerDid,
     })
   })
@@ -372,7 +403,9 @@ describe('optional AT Protocol service authentication', () => {
       auth(authContext(`Bearer ${token}`)),
     ])
     const fulfilled = results.filter(
-      (result): result is PromiseFulfilledResult<ServiceAuthCredentials | undefined> =>
+      (
+        result,
+      ): result is PromiseFulfilledResult<ServiceAuthCredentials | undefined> =>
         result.status === 'fulfilled',
     )
     const rejected = results.filter(
@@ -483,7 +516,8 @@ describe('optional AT Protocol service authentication', () => {
         otherIssuerDid,
         ...Array.from(
           { length: 7 },
-          (_, index) => `did:plc:${'a'.repeat(23)}${String.fromCharCode(98 + index)}`,
+          (_, index) =>
+            `did:plc:${'a'.repeat(23)}${String.fromCharCode(98 + index)}`,
         ),
       ]
       const capacityKeypairs = await Promise.all(
@@ -525,7 +559,9 @@ describe('optional AT Protocol service authentication', () => {
         status: 503,
         message: expect.stringContaining('at capacity'),
       })
-      await expect(auth(authContext(`Bearer ${tokens[0]}`))).rejects.toMatchObject({
+      await expect(
+        auth(authContext(`Bearer ${tokens[0]}`)),
+      ).rejects.toMatchObject({
         wwwAuthenticate: { Bearer: { error: 'NonceNotUnique' } },
       })
 
@@ -534,10 +570,14 @@ describe('optional AT Protocol service authentication', () => {
         exp: now() + 60,
         jti: 'after-purge-jti',
       })
-      await expect(auth(authContext(`Bearer ${freshToken}`))).resolves.toBeDefined()
+      await expect(
+        auth(authContext(`Bearer ${freshToken}`)),
+      ).resolves.toBeDefined()
 
       vi.setSystemTime(baseTimeMs + 60_500)
-      await expect(auth(authContext(`Bearer ${tokens[0]}`))).rejects.toMatchObject({
+      await expect(
+        auth(authContext(`Bearer ${tokens[0]}`)),
+      ).rejects.toMatchObject({
         error: 'AuthenticationRequired',
         message: 'JWT token expired',
         wwwAuthenticate: { Bearer: { error: 'JwtExpired' } },

@@ -79,10 +79,7 @@ describe('FeedRegistry', () => {
     const registry = new FeedRegistry([feed])
 
     await expect(
-      registry.loadPage(
-        { feedId, limit: 10, cursor: 'next-page' },
-        'metadata',
-      ),
+      registry.loadPage({ feedId, limit: 10, cursor: 'next-page' }, 'metadata'),
     ).resolves.toEqual({ rows: [row] })
     expect(feed.loadCalls).toEqual([
       {
@@ -128,7 +125,9 @@ describe('FeedRegistry', () => {
           new FakeRegisteredFeed(feedId, paramsType),
           new FakeRegisteredFeed(feedId, paramsType),
         ]),
-    ).toThrowError(expect.objectContaining({ message: expect.stringContaining(feedId) }))
+    ).toThrowError(
+      expect.objectContaining({ message: expect.stringContaining(feedId) }),
+    )
   })
 
   it('rejects an unknown feed before inspecting its params', async () => {

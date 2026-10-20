@@ -119,7 +119,9 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
         .filter(Boolean),
     ),
   ]
-  const invalidLabeler = trustedQualityLabelerDids.find((did) => !isValidDid(did))
+  const invalidLabeler = trustedQualityLabelerDids.find(
+    (did) => !isValidDid(did),
+  )
   if (invalidLabeler) {
     throw new Error(
       `TRUSTED_QUALITY_LABELER_DIDS contains invalid DID ${JSON.stringify(invalidLabeler)}; use a comma-separated list of valid DIDs.`,

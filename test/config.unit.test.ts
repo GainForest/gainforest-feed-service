@@ -78,9 +78,9 @@ describe('loadConfig', () => {
 
   it('explains how to fix missing and malformed values', () => {
     expect(() => loadConfig({})).toThrow('DATABASE_URL is required')
-    expect(() =>
-      loadConfig({ ...validEnvironment, PORT: '70000' }),
-    ).toThrow('PORT must be an integer from 1 through 65535')
+    expect(() => loadConfig({ ...validEnvironment, PORT: '70000' })).toThrow(
+      'PORT must be an integer from 1 through 65535',
+    )
     expect(() =>
       loadConfig({
         ...validEnvironment,

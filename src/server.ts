@@ -51,7 +51,8 @@ const metricsServer =
     ? undefined
     : createMetricsServer(metrics, {
         requestTimeoutMs: config.requestTimeoutMs,
-        onError: (error) => logger.error({ err: error }, 'metrics server error'),
+        onError: (error) =>
+          logger.error({ err: error }, 'metrics server error'),
       })
 // Node's request timeout bounds receiving the request, not handler or database work.
 server.requestTimeout = config.requestTimeoutMs

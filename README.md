@@ -217,24 +217,24 @@ Source JSON is never returned.
 
 For local development, copy `.env.example` to `.env`. For deployment, copy its values into the deployment's variable configuration. The process can load a local `.env`, but it never replaces variables already set in the environment.
 
-| Variable | Required | Default | Purpose |
-|---|---:|---:|---|
-| `DATABASE_URL` | yes | | Dedicated read-only Postgres URL for the HappyView database |
-| `SERVICE_DID` | yes | | DID identifying this service and required as the service-auth JWT audience |
-| `SERVICE_AUTH_MAX_AGE_SECONDS` | no | `300` | Maximum service-auth JWT age; bounded from 1 through 3600 seconds |
-| `DID_RESOLUTION_TIMEOUT_MS` | no | `2000` | Total timeout for one HTTPS DID-document resolution; bounded from 100 through 60000 ms |
-| `PORT` | no | `3000` | HTTP listen port |
-| `HOST` | no | `0.0.0.0` | Public HTTP listen interface |
-| `METRICS_HOST` | no | `0.0.0.0` | Private metrics listen interface; used only when `METRICS_PORT` is set |
-| `METRICS_PORT` | no | disabled | Enables the private `GET /metrics` listener on this port; must differ from `PORT` |
-| `LOG_LEVEL` | no | `info` | Pino log level |
-| `DATABASE_MAX_CONNECTIONS` | no | `5` | Maximum pool size, capped at 20; the pool keeps one connection warm |
-| `DATABASE_IDLE_TIMEOUT_MS` | no | `60000` | Time before idle connections above the one-connection minimum are closed |
-| `DATABASE_CONNECTION_TIMEOUT_MS` | no | `2000` | Pool acquisition timeout |
-| `DATABASE_STATEMENT_TIMEOUT_MS` | no | `5000` | PostgreSQL statement timeout |
-| `REQUEST_TIMEOUT_MS` | no | `10000` | Maximum time allowed to receive an HTTP request; not a handler or database deadline |
-| `GRACEFUL_SHUTDOWN_MS` | no | `10000` | Shutdown drain timeout |
-| `TRUSTED_QUALITY_LABELER_DIDS` | no | empty | Comma-separated labeler DIDs trusted for current HappyView quality-label rows |
+| Variable                         | Required |   Default | Purpose                                                                                |
+| -------------------------------- | -------: | --------: | -------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                   |      yes |           | Dedicated read-only Postgres URL for the HappyView database                            |
+| `SERVICE_DID`                    |      yes |           | DID identifying this service and required as the service-auth JWT audience             |
+| `SERVICE_AUTH_MAX_AGE_SECONDS`   |       no |     `300` | Maximum service-auth JWT age; bounded from 1 through 3600 seconds                      |
+| `DID_RESOLUTION_TIMEOUT_MS`      |       no |    `2000` | Total timeout for one HTTPS DID-document resolution; bounded from 100 through 60000 ms |
+| `PORT`                           |       no |    `3000` | HTTP listen port                                                                       |
+| `HOST`                           |       no | `0.0.0.0` | Public HTTP listen interface                                                           |
+| `METRICS_HOST`                   |       no | `0.0.0.0` | Private metrics listen interface; used only when `METRICS_PORT` is set                 |
+| `METRICS_PORT`                   |       no |  disabled | Enables the private `GET /metrics` listener on this port; must differ from `PORT`      |
+| `LOG_LEVEL`                      |       no |    `info` | Pino log level                                                                         |
+| `DATABASE_MAX_CONNECTIONS`       |       no |       `5` | Maximum pool size, capped at 20; the pool keeps one connection warm                    |
+| `DATABASE_IDLE_TIMEOUT_MS`       |       no |   `60000` | Time before idle connections above the one-connection minimum are closed               |
+| `DATABASE_CONNECTION_TIMEOUT_MS` |       no |    `2000` | Pool acquisition timeout                                                               |
+| `DATABASE_STATEMENT_TIMEOUT_MS`  |       no |    `5000` | PostgreSQL statement timeout                                                           |
+| `REQUEST_TIMEOUT_MS`             |       no |   `10000` | Maximum time allowed to receive an HTTP request; not a handler or database deadline    |
+| `GRACEFUL_SHUTDOWN_MS`           |       no |   `10000` | Shutdown drain timeout                                                                 |
+| `TRUSTED_QUALITY_LABELER_DIDS`   |       no |     empty | Comma-separated labeler DIDs trusted for current HappyView quality-label rows          |
 
 For example, set `SERVICE_DID=did:web:dev.feed.hypercerts.dev` only when `https://dev.feed.hypercerts.dev` routes to this service; clients can discover its XRPC endpoint using `did:web:dev.feed.hypercerts.dev#hypercerts_feed`. This service does not publish a signing key: it verifies callers using their own DID documents. The DID service entry is for discovery and does not change JWT audience validation.
 

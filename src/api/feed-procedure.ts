@@ -87,12 +87,14 @@ export const registerFeedProcedure = <Output>({
   }
 
   if (auth === undefined) {
-    const unauthenticatedHandler: LexRouterMethodHandler<JsonProcedure, void> =
-      async ({ input }) =>
-        handler(
-          (input as unknown as { body: GetFeedSkeletonInput }).body,
-          undefined,
-        )
+    const unauthenticatedHandler: LexRouterMethodHandler<
+      JsonProcedure,
+      void
+    > = async ({ input }) =>
+      handler(
+        (input as unknown as { body: GetFeedSkeletonInput }).body,
+        undefined,
+      )
     router.add(method, unauthenticatedHandler)
   } else {
     const authenticatedHandler: LexRouterMethodHandler<

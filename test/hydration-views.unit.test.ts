@@ -20,7 +20,10 @@ const secondBlobCid =
 const createdAt = '2026-07-20T00:00:00.000Z'
 const targetUri = `at://${subjectDid}/org.hypercerts.claim.activity/target`
 
-const strongRef = (uri = targetUri, valueCid = cid): Record<string, unknown> => ({
+const strongRef = (
+  uri = targetUri,
+  valueCid = cid,
+): Record<string, unknown> => ({
   $type: 'com.atproto.repo.strongRef',
   uri,
   cid: valueCid,
@@ -134,7 +137,9 @@ const validated = (
   const result = validateFeedRecord(kind, collection, value)
   expect(result).toBeDefined()
   if (result === undefined) {
-    throw new Error('Expected the test fixture to produce a validated feed record.')
+    throw new Error(
+      'Expected the test fixture to produce a validated feed record.',
+    )
   }
   return result
 }
@@ -149,9 +154,21 @@ describe('top-level record validation', () => {
     const cases: readonly [FeedKind, string, unknown][] = [
       ['cert.create', 'org.hypercerts.claim.activity', records.activity],
       ['collection.create', 'org.hypercerts.collection', records.collection],
-      ['project.created_with_cert', 'org.hypercerts.collection', records.collection],
-      ['evaluation.create', 'org.hypercerts.context.evaluation', records.evaluation],
-      ['measurement.create', 'org.hypercerts.context.measurement', records.measurement],
+      [
+        'project.created_with_cert',
+        'org.hypercerts.collection',
+        records.collection,
+      ],
+      [
+        'evaluation.create',
+        'org.hypercerts.context.evaluation',
+        records.evaluation,
+      ],
+      [
+        'measurement.create',
+        'org.hypercerts.context.measurement',
+        records.measurement,
+      ],
       ['update.create', 'org.hypercerts.context.attachment', records.update],
       ['endorsement.award', 'app.certified.badge.award', records.endorsement],
     ]
@@ -194,7 +211,11 @@ describe('top-level record validation', () => {
       ),
     ).toBeUndefined()
     expect(
-      validateFeedRecord('cert.create', 'example.unknown.collection', records.activity),
+      validateFeedRecord(
+        'cert.create',
+        'example.unknown.collection',
+        records.activity,
+      ),
     ).toBeUndefined()
     for (const kind of collectionKinds) {
       expect(
@@ -242,7 +263,11 @@ describe('top-level record validation', () => {
     }
 
     expect(
-      validateFeedRecord('endorsement.award', 'app.certified.badge.award', recordSubject),
+      validateFeedRecord(
+        'endorsement.award',
+        'app.certified.badge.award',
+        recordSubject,
+      ),
     ).toBeUndefined()
     expect(
       getEndorsedActorDid(
@@ -255,7 +280,11 @@ describe('top-level record validation', () => {
     ).toBe(subjectDid)
     expect(
       getEndorsedActorDid(
-        validated('cert.create', 'org.hypercerts.claim.activity', records.activity),
+        validated(
+          'cert.create',
+          'org.hypercerts.claim.activity',
+          records.activity,
+        ),
       ),
     ).toBeUndefined()
   })
@@ -319,7 +348,9 @@ describe('top-level record validation', () => {
         {
           ...records.evaluation,
           content: [
-            smallBlob('application/octet-stream', blobCid, { size: 10_485_761 }),
+            smallBlob('application/octet-stream', blobCid, {
+              size: 10_485_761,
+            }),
           ],
         },
       ],
@@ -340,7 +371,9 @@ describe('top-level record validation', () => {
           content: [
             uriImage('https://example.com/evaluation'),
             { $type: 'example.future#attachment', value: 'future' },
-            smallBlob('application/octet-stream', blobCid, { size: 10_485_760 }),
+            smallBlob('application/octet-stream', blobCid, {
+              size: 10_485_760,
+            }),
           ],
         },
       ),
@@ -351,7 +384,11 @@ describe('top-level record validation', () => {
     const raw = JSON.parse(
       JSON.stringify({ ...records.activity, image: smallImage() }),
     )
-    const result = validated('cert.create', 'org.hypercerts.claim.activity', raw)
+    const result = validated(
+      'cert.create',
+      'org.hypercerts.claim.activity',
+      raw,
+    )
 
     expect(result.rawValue).toBe(raw)
     expect(result.value).not.toBe(raw)
@@ -427,9 +464,7 @@ describe('feed-card view builders', () => {
       'project.created_with_cert',
     ] as const) {
       expect(
-        buildFeedItemView(
-          validated(kind, 'org.hypercerts.collection', raw),
-        ),
+        buildFeedItemView(validated(kind, 'org.hypercerts.collection', raw)),
       ).toEqual(expected)
     }
   })
@@ -473,16 +508,12 @@ describe('feed-card view builders', () => {
       records.endorsement,
     )
 
-    expect(
-      buildFeedItemView(record, { endorsedActor }),
-    ).toEqual({
+    expect(buildFeedItemView(record, { endorsedActor })).toEqual({
       $type: 'org.hypercerts.feed.defs#endorsementView',
       subject: endorsedActor,
       createdAt,
     })
-    expect(() =>
-      buildFeedItemView(record),
-    ).toThrow(
+    expect(() => buildFeedItemView(record)).toThrow(
       'Endorsement view failed because the endorsed account could not be matched to its discovered identity; verify endorsement DID discovery and identity mapping before serving hydrated pages.',
     )
     expect(() =>
@@ -509,10 +540,7 @@ describe('feed-card view builders', () => {
       'org.hypercerts.context.measurement',
       {
         ...records.measurement,
-        subjects: [
-          strongRef(),
-          strongRef(`${targetUri}-ignored`, secondCid),
-        ],
+        subjects: [strongRef(), strongRef(`${targetUri}-ignored`, secondCid)],
       },
     )
     expect(buildFeedItemView(evaluation)).toEqual({
@@ -544,10 +572,7 @@ describe('feed-card view builders', () => {
       {
         ...records.update,
         shortDescription: 'Photos and supporting documents',
-        subjects: [
-          strongRef(),
-          strongRef(`${targetUri}-ignored`, secondCid),
-        ],
+        subjects: [strongRef(), strongRef(`${targetUri}-ignored`, secondCid)],
         content: [
           smallBlob('application/pdf'),
           uriImage('https://example.com/arbitrary.png'),

@@ -108,7 +108,8 @@ describe('Hypercerts feed definition against Postgres', () => {
     } = {},
   ): Promise<string> => {
     const uri = `at://${did}/${collection}/${rkey}`
-    const indexedAt = options.indexedAt === undefined ? effectiveAt : options.indexedAt
+    const indexedAt =
+      options.indexedAt === undefined ? effectiveAt : options.indexedAt
     const recordText = typeof body === 'string' ? body : JSON.stringify(body)
     await admin.query(
       `INSERT INTO happyview_records (
@@ -120,7 +121,10 @@ describe('Hypercerts feed definition against Postgres', () => {
     return uri
   }
 
-  const seedFollow = async (viewerDid: string, subjectDid: string): Promise<void> => {
+  const seedFollow = async (
+    viewerDid: string,
+    subjectDid: string,
+  ): Promise<void> => {
     await seedRecord(
       viewerDid,
       'app.certified.graph.follow',
@@ -133,7 +137,8 @@ describe('Hypercerts feed definition against Postgres', () => {
   type HypercertsFeedOverrides = Omit<
     HypercertsFeedParams,
     '$type' | 'viewerDid'
-  > & Pick<GetFeedSkeletonInput, 'limit' | 'cursor'>
+  > &
+    Pick<GetFeedSkeletonInput, 'limit' | 'cursor'>
 
   const createPages = (
     trustedQualityLabelerDids: readonly string[] = [],
@@ -293,8 +298,7 @@ describe('Hypercerts feed definition against Postgres', () => {
     const staleCertified = { marker: 'stale-certified-self' }
     const currentCertified = { marker: 'current-certified-self' }
     const blueskyBody = { marker: 'bluesky-self' }
-    const certifiedUri =
-      `at://${actorWithProfiles}/app.certified.actor.profile/self`
+    const certifiedUri = `at://${actorWithProfiles}/app.certified.actor.profile/self`
 
     await seedRecord(
       actorWithProfiles,
@@ -341,7 +345,10 @@ describe('Hypercerts feed definition against Postgres', () => {
       ]),
     ).resolves.toEqual(
       new Map([
-        [actorWithProfiles, { did: actorWithProfiles, certifiedProfile: currentCertified }],
+        [
+          actorWithProfiles,
+          { did: actorWithProfiles, certifiedProfile: currentCertified },
+        ],
         [blueskyOnly, { did: blueskyOnly }],
         [missingIdentity, { did: missingIdentity }],
         [wrongCollection, { did: wrongCollection }],
@@ -600,7 +607,6 @@ describe('Hypercerts feed definition against Postgres', () => {
     })
     expect(projectOnly.feed).toHaveLength(1)
     expect(projectOnly.feed[0]?.subject).toBe(collectionUri)
-
   })
 
   it('detects organizations only through the exact organization self record', async () => {
@@ -637,15 +643,13 @@ describe('Hypercerts feed definition against Postgres', () => {
       [personWithNearMatch, organization],
       {
         organizationQuality: {
-        allowed: ['high-quality'],
+          allowed: ['high-quality'],
           includeUnrated: false,
         },
       },
     )
 
-    expect(output.feed.map((item) => item.subject)).toEqual([
-      personActivity,
-    ])
+    expect(output.feed.map((item) => item.subject)).toEqual([personActivity])
   })
 
   it('filters organizations using active trusted bare-DID HappyView labels', async () => {
@@ -712,18 +716,12 @@ describe('Hypercerts feed definition against Postgres', () => {
       'high-quality',
       { exp: 'infinity' },
     )
-    await seedHappyViewLabel(
-      trustedLabeler,
-      infiniteCtsOrg,
-      'high-quality',
-      { cts: '-infinity' },
-    )
-    await seedHappyViewLabel(
-      trustedLabeler,
-      dateOnlyCtsOrg,
-      'high-quality',
-      { cts: '2999-01-01' },
-    )
+    await seedHappyViewLabel(trustedLabeler, infiniteCtsOrg, 'high-quality', {
+      cts: '-infinity',
+    })
+    await seedHappyViewLabel(trustedLabeler, dateOnlyCtsOrg, 'high-quality', {
+      cts: '2999-01-01',
+    })
     await seedHappyViewLabel(untrustedLabeler, untrustedOrg, 'high-quality')
     await seedHappyViewLabel(
       trustedLabeler,
@@ -1084,9 +1082,9 @@ describe('Hypercerts feed definition against Postgres', () => {
         feedRequest(viewer, { trustedEvaluators: [disallowedIssuer] }),
       ),
     ).resolves.toEqual({ feed: [] })
-    await expect(
-      getFeedForFollows([disallowedIssuer]),
-    ).resolves.toEqual({ feed: [] })
+    await expect(getFeedForFollows([disallowedIssuer])).resolves.toEqual({
+      feed: [],
+    })
 
     const allowedAwardUri = await seedRecord(
       allowedIssuer,
@@ -1120,12 +1118,12 @@ describe('Hypercerts feed definition against Postgres', () => {
     expect(allowedOutput.feed.map((item) => item.subject)).toEqual([
       allowedAwardUri,
     ])
-    expect(allowedOutput.feed.some((item) => item.subject === disallowedAwardUri)).toBe(
-      false,
-    )
-    expect(allowedOutput.feed.some((item) => item.subject === malformedAwardUri)).toBe(
-      false,
-    )
+    expect(
+      allowedOutput.feed.some((item) => item.subject === disallowedAwardUri),
+    ).toBe(false)
+    expect(
+      allowedOutput.feed.some((item) => item.subject === malformedAwardUri),
+    ).toBe(false)
     expect(
       allowedOutput.feed.some(
         (item) => item.subject === disallowedSubjectActivity,
@@ -1190,9 +1188,7 @@ describe('Hypercerts feed definition against Postgres', () => {
       ),
     ).resolves.toEqual({ feed: [] })
 
-    await expect(
-      getFeedForFollows([evaluator]),
-    ).resolves.toEqual({ feed: [] })
+    await expect(getFeedForFollows([evaluator])).resolves.toEqual({ feed: [] })
   })
 
   it('requires exact CIDs when pairing projects and resolving badge definitions', async () => {
@@ -1268,9 +1264,9 @@ describe('Hypercerts feed definition against Postgres', () => {
       'cert.create',
     ])
     expect(output.feed.some((item) => item.subject === awardUri)).toBe(false)
-    expect(
-      output.feed.some((item) => item.subject === subjectActivity),
-    ).toBe(false)
+    expect(output.feed.some((item) => item.subject === subjectActivity)).toBe(
+      false,
+    )
   })
 
   it('suppresses a paired activity across a pagination boundary', async () => {
@@ -1348,10 +1344,7 @@ describe('Hypercerts feed definition against Postgres', () => {
     const first = await service.getFeedSkeleton(
       feedRequest(viewer, { limit: 2 }),
     )
-    expect(first.feed.map((item) => item.subject)).toEqual([
-      uris[2],
-      uris[1],
-    ])
+    expect(first.feed.map((item) => item.subject)).toEqual([uris[2], uris[1]])
     expect(first.cursor).toBeDefined()
 
     const second = await service.getFeedSkeleton(
@@ -1380,9 +1373,9 @@ describe('Hypercerts feed definition against Postgres', () => {
       '2026-07-22T02:00:00Z',
     )
 
-    await expect(
-      service.getFeedSkeleton(feedRequest(viewer)),
-    ).resolves.toEqual({ feed: [] })
+    await expect(service.getFeedSkeleton(feedRequest(viewer))).resolves.toEqual(
+      { feed: [] },
+    )
   })
 
   it('ignores responses that target a stale award CID', async () => {
@@ -1462,9 +1455,7 @@ describe('Hypercerts feed definition against Postgres', () => {
 
     const output = await service.getFeedSkeleton(feedRequest(viewer))
 
-    expect(output.feed.map((item) => item.subject)).toEqual([
-      followedUri,
-    ])
+    expect(output.feed.map((item) => item.subject)).toEqual([followedUri])
     expect(output.feed.some((item) => item.subject === unfollowedUri)).toBe(
       false,
     )

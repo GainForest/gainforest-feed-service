@@ -121,10 +121,7 @@ const mapScoredRow: FeedRowMapper<ScoredDatabaseRow, ScoredFeedRow> = (
   return { ...metadata, sourceValue: row.source_json }
 }
 
-const databaseRow = (
-  suffix: string,
-  score: number,
-): ScoredDatabaseRow => {
+const databaseRow = (suffix: string, score: number): ScoredDatabaseRow => {
   const uri = `at://${actorDid}/org.hypercerts.claim.activity/${suffix}`
   return {
     uri,
@@ -205,9 +202,10 @@ describe('defineSqlFeed', () => {
         values: [null, false, 3],
       },
     ])
-    expect(
-      decodeCursor(feedId, page.cursor, scoredCursor),
-    ).toEqual({ score: 2, uri: databaseRow('2', 2).uri })
+    expect(decodeCursor(feedId, page.cursor, scoredCursor)).toEqual({
+      score: 2,
+      uri: databaseRow('2', 2).uri,
+    })
   })
 
   it('maps exact source rows in with-source mode', async () => {
@@ -215,11 +213,7 @@ describe('defineSqlFeed', () => {
     const feed = createFeed(new FakeQueryExecutor([source]))
 
     await expect(
-      feed.loadPage(
-        { $type: paramsType } as ScoredParams,
-        {},
-        'with-source',
-      ),
+      feed.loadPage({ $type: paramsType } as ScoredParams, {}, 'with-source'),
     ).resolves.toEqual({
       rows: [
         {
@@ -256,17 +250,12 @@ describe('defineSqlFeed', () => {
 
   it('rejects a with-source mapper that omits sourceValue', async () => {
     const source = databaseRow('1', 1)
-    const feed = createFeed(
-      new FakeQueryExecutor([source]),
-      (row) => mapScoredRow(row, 'metadata'),
+    const feed = createFeed(new FakeQueryExecutor([source]), (row) =>
+      mapScoredRow(row, 'metadata'),
     )
 
     await expect(
-      feed.loadPage(
-        { $type: paramsType } as ScoredParams,
-        {},
-        'with-source',
-      ),
+      feed.loadPage({ $type: paramsType } as ScoredParams, {}, 'with-source'),
     ).rejects.toThrow(/without sourceValue in with-source mode/i)
   })
 
@@ -290,11 +279,7 @@ describe('defineSqlFeed', () => {
     )
 
     await expect(
-      feed.loadPage(
-        { $type: paramsType } as ScoredParams,
-        {},
-        'metadata',
-      ),
+      feed.loadPage({ $type: paramsType } as ScoredParams, {}, 'metadata'),
     ).rejects.toBe(failure)
     expect(await metrics.registry.metrics()).toContain(
       'hypercerts_feed_database_duration_seconds_count{operation="feed"} 1',
@@ -313,11 +298,7 @@ describe('defineSqlFeed', () => {
       sortValue: '2026-07-21T10:00:01.000000Z',
       score: 1,
     }
-    const cursor = encodeCursor(
-      otherFeedId,
-      cursorRow,
-      scoredCursor,
-    )
+    const cursor = encodeCursor(otherFeedId, cursorRow, scoredCursor)
 
     await expect(
       feed.loadPage(

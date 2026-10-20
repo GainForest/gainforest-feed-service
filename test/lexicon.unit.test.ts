@@ -15,12 +15,13 @@ import {
 
 const readLexicon = (relativePath: string): Record<string, any> =>
   JSON.parse(
-    readFileSync(new URL(`../lexicons/${relativePath}`, import.meta.url), 'utf8'),
+    readFileSync(
+      new URL(`../lexicons/${relativePath}`, import.meta.url),
+      'utf8',
+    ),
   ) as Record<string, any>
 
-const skeletonLexicon = readLexicon(
-  'org/hypercerts/feed/getFeedSkeleton.json',
-)
+const skeletonLexicon = readLexicon('org/hypercerts/feed/getFeedSkeleton.json')
 const hydratedLexicon = readLexicon('org/hypercerts/feed/getFeed.json')
 const defsLexicon = readLexicon('org/hypercerts/feed/defs.json')
 
@@ -247,9 +248,7 @@ describe('feed Lexicon contract', () => {
       },
     })
     expect(defs).toHaveProperty('organizationQualityPolicy')
-    expect(skeletonLexicon.defs).not.toHaveProperty(
-      'organizationQualityPolicy',
-    )
+    expect(skeletonLexicon.defs).not.toHaveProperty('organizationQualityPolicy')
     expect(defs).not.toHaveProperty('feedSkeletonItem')
 
     expect(() =>
@@ -375,10 +374,7 @@ describe('feed Lexicon contract', () => {
     ])
     expect(defs.actorSummary.properties.avatar).toEqual({
       type: 'union',
-      refs: [
-        'org.hypercerts.defs#uri',
-        'org.hypercerts.defs#smallImage',
-      ],
+      refs: ['org.hypercerts.defs#uri', 'org.hypercerts.defs#smallImage'],
     })
     expect(defs.activityView.properties.image).toEqual(
       defs.actorSummary.properties.avatar,
@@ -393,10 +389,7 @@ describe('feed Lexicon contract', () => {
     })
     expect(defs.updateView.properties.image).toEqual({
       type: 'union',
-      refs: [
-        'org.hypercerts.defs#uri',
-        'org.hypercerts.defs#smallBlob',
-      ],
+      refs: ['org.hypercerts.defs#uri', 'org.hypercerts.defs#smallBlob'],
     })
   })
 

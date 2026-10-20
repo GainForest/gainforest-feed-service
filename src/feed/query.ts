@@ -64,14 +64,15 @@ const parseSourceRecord = (value: unknown): unknown => {
   }
 }
 
-const parseHypercertsFeedParams = (
-  input: { readonly $type: string },
-): HypercertsFeedParams => {
+const parseHypercertsFeedParams = (input: {
+  readonly $type: string
+}): HypercertsFeedParams => {
   let parsed: ReturnType<typeof hypercertsFeedParamsSchema.schema.$parse>
   try {
     parsed = hypercertsFeedParamsSchema.schema.$parse(input)
   } catch (cause) {
-    const detail = cause instanceof Error && cause.message ? `: ${cause.message}` : ''
+    const detail =
+      cause instanceof Error && cause.message ? `: ${cause.message}` : ''
     throw new FeedError(
       FeedErrorCode.InvalidRequest,
       `params does not match ${HYPERCERTS_FEED_PARAMS_TYPE}${detail}; correct the feed parameters and retry.`,

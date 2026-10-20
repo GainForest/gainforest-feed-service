@@ -1,7 +1,4 @@
-import type {
-  FeedPageLoader,
-  InternalSourceFeedRow,
-} from '../feed/registry.js'
+import type { FeedPageLoader, InternalSourceFeedRow } from '../feed/registry.js'
 import type { GetFeedSkeletonInput } from '../feed/types.js'
 import type {
   ActorContext,
@@ -56,11 +53,7 @@ const collectValidatedFeedRows = (
   const requestedDids = new Set<string>()
 
   for (const row of rows) {
-    const record = validateFeedRecord(
-      row.kind,
-      row.collection,
-      row.sourceValue,
-    )
+    const record = validateFeedRecord(row.kind, row.collection, row.sourceValue)
     if (record === undefined) continue
 
     const endorsedDid = getEndorsedActorDid(record)
@@ -118,9 +111,7 @@ export class HydratedFeedService implements HydratedFeedReader {
   ) {}
 
   /** Builds one ordered, view-only hydrated feed page. */
-  async getFeed(
-    input: GetFeedSkeletonInput,
-  ): Promise<GetHydratedFeedOutput> {
+  async getFeed(input: GetFeedSkeletonInput): Promise<GetHydratedFeedOutput> {
     const page = await this.pages.loadPage(input, 'with-source')
     const batch = collectValidatedFeedRows(page.rows)
 

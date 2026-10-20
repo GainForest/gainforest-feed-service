@@ -20,7 +20,10 @@ const blobCid = 'bafkreiehxpuhtr5f6v4eu4byjo2j7kkrhjvd7psmfu4imnpdzb3bdqb7vy'
 const createdAt = '2026-07-20T00:00:00.000Z'
 
 class FakeQueryExecutor implements IdentityQueryExecutor {
-  readonly calls: { readonly text: string; readonly values: readonly unknown[] }[] = []
+  readonly calls: {
+    readonly text: string
+    readonly values: readonly unknown[]
+  }[] = []
 
   constructor(
     private readonly resultRows: readonly Record<string, unknown>[],
@@ -149,7 +152,10 @@ describe('PostgresIdentityReader', () => {
   })
 
   it('propagates PostgreSQL rejection without returning partial contexts', async () => {
-    const database = new FakeQueryExecutor([], new Error('identity query failed'))
+    const database = new FakeQueryExecutor(
+      [],
+      new Error('identity query failed'),
+    )
     const reader = new PostgresIdentityReader(database)
 
     await expect(reader.getByDids([didA, didB])).rejects.toThrow(
@@ -161,7 +167,9 @@ describe('PostgresIdentityReader', () => {
 
 describe('Certified profile validation', () => {
   it('accepts valid v1.0.0 profiles and rejects malformed or wrong-type records', () => {
-    expect(validateCertifiedProfile(profile({ displayName: 'Alice' }))).toMatchObject({
+    expect(
+      validateCertifiedProfile(profile({ displayName: 'Alice' })),
+    ).toMatchObject({
       $type: 'app.certified.actor.profile',
       displayName: 'Alice',
     })
@@ -232,9 +240,7 @@ describe('Certified profile validation', () => {
     )
 
     expect(validated).toBeDefined()
-    expect(
-      buildActorSummary(didA, validated),
-    ).toEqual({ did: didA })
+    expect(buildActorSummary(didA, validated)).toEqual({ did: didA })
   })
 
   it('treats all six supported fields as meaningful only after validation', () => {

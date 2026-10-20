@@ -60,10 +60,9 @@ describe('Hypercerts SQL feed definition', () => {
         source_json: null,
       }),
     ])
-    const feed = createHypercertsFeed(
-      { database, metrics: new Metrics() },
-      [trustedLabeler],
-    )
+    const feed = createHypercertsFeed({ database, metrics: new Metrics() }, [
+      trustedLabeler,
+    ])
 
     await expect(
       feed.loadPage(params, { limit: 2 }, 'metadata'),
@@ -100,10 +99,7 @@ describe('Hypercerts SQL feed definition', () => {
 
   it('rejects structural and semantic params failures before querying', async () => {
     const database = new FakeQueryExecutor([])
-    const feed = createHypercertsFeed(
-      { database, metrics: new Metrics() },
-      [],
-    )
+    const feed = createHypercertsFeed({ database, metrics: new Metrics() }, [])
 
     await expect(
       feed.loadPage({ $type: paramsType }, {}, 'metadata'),
@@ -129,10 +125,7 @@ describe('Hypercerts SQL feed definition', () => {
     const database = new FakeQueryExecutor([
       resultRow({ source_json: JSON.stringify(sourceValue) }),
     ])
-    const feed = createHypercertsFeed(
-      { database, metrics: new Metrics() },
-      [],
-    )
+    const feed = createHypercertsFeed({ database, metrics: new Metrics() }, [])
 
     await expect(
       feed.loadPage(params, { limit: 2 }, 'with-source'),
@@ -151,9 +144,9 @@ describe('Hypercerts SQL feed definition', () => {
     })
     expect(database.calls[0]?.values[11]).toBe(true)
     const sql = database.calls[0]?.text ?? ''
-    expect(sql.indexOf('selected_source.record AS source_json')).toBeGreaterThan(
-      sql.indexOf('paged_events AS'),
-    )
+    expect(
+      sql.indexOf('selected_source.record AS source_json'),
+    ).toBeGreaterThan(sql.indexOf('paged_events AS'))
     expect(sql).toContain('ON $12::boolean')
     expect(sql).toContain('selected_source.uri = page.uri')
     expect(sql).toContain('selected_source.cid = page.cid')
@@ -185,19 +178,22 @@ describe('Hypercerts SQL feed definition', () => {
     { actor_did: null },
     { kind: null },
     { sort_value: null },
-  ])('fails instead of silently dropping incomplete metadata: %o', async (overrides) => {
-    const feed = createHypercertsFeed(
-      {
-        database: new FakeQueryExecutor([resultRow(overrides)]),
-        metrics: new Metrics(),
-      },
-      [],
-    )
+  ])(
+    'fails instead of silently dropping incomplete metadata: %o',
+    async (overrides) => {
+      const feed = createHypercertsFeed(
+        {
+          database: new FakeQueryExecutor([resultRow(overrides)]),
+          metrics: new Metrics(),
+        },
+        [],
+      )
 
-    await expect(
-      feed.loadPage(params, { limit: 2 }, 'metadata'),
-    ).rejects.toThrow('metadata invariant failed')
-  })
+      await expect(
+        feed.loadPage(params, { limit: 2 }, 'metadata'),
+      ).rejects.toThrow('metadata invariant failed')
+    },
+  )
 
   it('preserves a present JSON null source value', async () => {
     const feed = createHypercertsFeed(
@@ -220,17 +216,20 @@ describe('Hypercerts SQL feed definition', () => {
     { selected_source_cid: 'bafyreimismatch' },
     { selected_source_collection: null },
     { selected_source_collection: 'org.hypercerts.collection' },
-  ])('rejects a missing or mismatched selected source: %o', async (overrides) => {
-    const feed = createHypercertsFeed(
-      {
-        database: new FakeQueryExecutor([resultRow(overrides)]),
-        metrics: new Metrics(),
-      },
-      [],
-    )
+  ])(
+    'rejects a missing or mismatched selected source: %o',
+    async (overrides) => {
+      const feed = createHypercertsFeed(
+        {
+          database: new FakeQueryExecutor([resultRow(overrides)]),
+          metrics: new Metrics(),
+        },
+        [],
+      )
 
-    await expect(
-      feed.loadPage(params, { limit: 2 }, 'with-source'),
-    ).rejects.toThrow('source invariant failed')
-  })
+      await expect(
+        feed.loadPage(params, { limit: 2 }, 'with-source'),
+      ).rejects.toThrow('source invariant failed')
+    },
+  )
 })

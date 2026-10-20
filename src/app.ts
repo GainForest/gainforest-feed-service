@@ -123,7 +123,10 @@ const readBoundedRequest = async (
   request: Request,
 ): Promise<Request | Response> => {
   const declaredLength = request.headers.get('content-length')
-  if (declaredLength !== null && Number(declaredLength) > MAX_REQUEST_BODY_BYTES) {
+  if (
+    declaredLength !== null &&
+    Number(declaredLength) > MAX_REQUEST_BODY_BYTES
+  ) {
     return requestTooLargeResponse()
   }
   if (request.body === null) return request
@@ -285,17 +288,11 @@ const handleReadyRequest = async (
 
   const startedAt = performance.now()
   const compatibility = await database.checkCompatibility()
-  metrics.observeDatabase(
-    'readiness',
-    (performance.now() - startedAt) / 1_000,
-  )
+  metrics.observeDatabase('readiness', (performance.now() - startedAt) / 1_000)
   metrics.setReady(compatibility.compatible)
   return compatibility.compatible
     ? jsonResponse({ status: 'ready' })
-    : jsonResponse(
-        { status: 'not_ready', reason: compatibility.reason },
-        503,
-      )
+    : jsonResponse({ status: 'not_ready', reason: compatibility.reason }, 503)
 }
 
 const handleFeedRequest = async (
@@ -371,7 +368,10 @@ export const createApp = (
   const router = new LexRouter({
     onHandlerError: ({ error, method }) => {
       if (error instanceof LexServerError) return
-      logger.error({ err: error, nsid: method.nsid }, 'unexpected XRPC handler error')
+      logger.error(
+        { err: error, nsid: method.nsid },
+        'unexpected XRPC handler error',
+      )
     },
   })
   registerGetFeedSkeleton(router, services.skeleton, logger, auth)
