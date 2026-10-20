@@ -141,7 +141,7 @@ const mapHypercertsFeedRow: FeedRowMapper<
 
 /** Builds the current Hypercerts feed definition over one read-only SQL runtime. */
 export const createHypercertsFeed = (
-  runtime: SqlFeedRuntime,
+  runtime: SqlFeedRuntime<HypercertsFeedQueryRow>,
   trustedQualityLabelerDids: readonly string[],
 ): RegisteredFeed =>
   defineSqlFeed(runtime, {

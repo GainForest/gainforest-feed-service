@@ -1,4 +1,5 @@
 import type {
+  InferMethodInputBody,
   InferMethodOutputBody,
   LexValue,
   Main,
@@ -15,6 +16,7 @@ import {
 } from '@atproto/lex-server'
 import type { Logger } from 'pino'
 
+import type { $input as feedInput } from '../lexicons/org/hypercerts/feed/getFeedSkeleton.defs.js'
 import { applyAuthenticatedViewer } from '../auth/input.js'
 import type {
   OptionalServiceAuth,
@@ -26,13 +28,22 @@ import type { GetFeedSkeletonInput } from '../feed/types.js'
 type JsonProcedure = Procedure<
   NsidString,
   ParamsSchema,
-  Payload<'application/json', Schema<LexValue>>,
+  typeof feedInput,
   Payload<'application/json', Schema<LexValue>>
 >
+
+type FeedProcedureInput = InferMethodInputBody<JsonProcedure>
 
 type FeedProcedureOutputParser<Output> = (
   output: Output,
 ) => InferMethodOutputBody<JsonProcedure>
+
+const toFeedInput = (input: FeedProcedureInput): GetFeedSkeletonInput => ({
+  feedId: input.feedId,
+  ...(input.params === undefined ? {} : { params: input.params }),
+  ...(input.limit === undefined ? {} : { limit: input.limit }),
+  ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
+})
 
 interface RegisterFeedProcedureOptions<Output> {
   readonly router: LexRouter
@@ -55,11 +66,13 @@ export const registerFeedProcedure = <Output>({
   errorLog,
 }: RegisterFeedProcedureOptions<Output>): void => {
   const handler = async (
-    input: GetFeedSkeletonInput,
+    input: FeedProcedureInput,
     credentials: ServiceAuthCredentials | undefined,
   ) => {
     try {
-      const output = await execute(applyAuthenticatedViewer(input, credentials))
+      const output = await execute(
+        applyAuthenticatedViewer(toFeedInput(input), credentials),
+      )
       return { body: parseOutput(output) }
     } catch (cause) {
       if (cause instanceof FeedError) {
@@ -89,23 +102,13 @@ export const registerFeedProcedure = <Output>({
     const unauthenticatedHandler: LexRouterMethodHandler<
       JsonProcedure,
       void
-    > = async ({ input }) =>
-      handler(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- LexRouter dispatches only after the procedure's generated input parser succeeds.
-        (input as unknown as { body: GetFeedSkeletonInput }).body,
-        undefined,
-      )
+    > = async ({ input }) => handler(input.body, undefined)
     router.add(method, unauthenticatedHandler)
   } else {
     const authenticatedHandler: LexRouterMethodHandler<
       JsonProcedure,
       ServiceAuthCredentials | undefined
-    > = async ({ input, credentials }) =>
-      handler(
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- LexRouter dispatches only after the procedure's generated input parser succeeds.
-        (input as unknown as { body: GetFeedSkeletonInput }).body,
-        credentials,
-      )
+    > = async ({ input, credentials }) => handler(input.body, credentials)
     router.add(method, { auth, handler: authenticatedHandler })
   }
 }

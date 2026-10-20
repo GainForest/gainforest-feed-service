@@ -18,7 +18,6 @@
     "lint": "eslint . --max-warnings 0",
     "prelint:fix": "npm run codegen",
     "lint:fix": "eslint . --fix --max-warnings 0",
-    "lint:config": "node scripts/check-eslint-config.mjs",
     "format": "prettier --write \"**/*.{ts,mjs,md,yml,yaml,json}\"",
     "format:check": "prettier --check \"**/*.{ts,mjs,md,yml,yaml,json}\"",
     "pretest": "npm run codegen",

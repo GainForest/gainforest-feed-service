@@ -216,8 +216,7 @@ export const createOptionalServiceAuth = (
   // only after the built-in verifier and the exact endpoint check succeed.
   const verify = serviceAuth({
     ...options,
-    // eslint-disable-next-line @typescript-eslint/require-await -- Keep the Promise-returning callback behavior required by UniqueNonceChecker.
-    unique: async () => true,
+    unique: () => Promise.resolve(true),
   })
   const replayProtector = createReplayProtector()
 

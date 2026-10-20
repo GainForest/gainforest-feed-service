@@ -103,11 +103,23 @@ const post = (
   return new Request(url, { method: 'POST', headers, body })
 }
 
-const trustedCredentials = (did: string): ServiceAuthCredentials => {
-  // The app boundary needs only the verified issuer; auth.unit.test.ts covers full JWT verification.
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Deliberately minimal credentials fixture for DID-binding tests.
-  return { did } as unknown as ServiceAuthCredentials
-}
+const trustedCredentials = (
+  did: ServiceAuthCredentials['did'],
+): ServiceAuthCredentials => ({
+  did,
+  didDocument: { id: did },
+  jwt: {
+    header: { alg: 'ES256' },
+    payload: {
+      iss: did,
+      aud: 'did:web:feed.example',
+      exp: 1,
+      lxm: 'org.hypercerts.feed.getFeedSkeleton',
+    },
+    message: new Uint8Array(),
+    signature: new Uint8Array(),
+  },
+})
 
 const authFor =
   (

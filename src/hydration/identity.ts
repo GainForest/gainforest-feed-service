@@ -35,12 +35,10 @@ const parseCertifiedProfile = (value: unknown): unknown => {
 
 /** Narrow structural query capability used by the identity adapter. */
 export interface IdentityQueryExecutor {
-  // The caller selects this row shape in SQL, so the generic is necessarily return-only.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- PostgreSQL result rows cannot be inferred from the query string.
-  query<T extends QueryResultRow>(
+  query(
     text: string,
     values?: readonly unknown[],
-  ): Promise<{ readonly rows: readonly T[] }>
+  ): Promise<{ readonly rows: readonly IdentityQueryRow[] }>
 }
 
 /** Read-only PostgreSQL adapter for current HappyView Certified-profile data. */
@@ -56,9 +54,7 @@ export class PostgresIdentityReader implements IdentityReader {
     const contexts = new Map<string, ActorContext>(
       uniqueDids.map((did) => [did, { did }]),
     )
-    const result = await this.database.query<IdentityQueryRow>(IDENTITY_QUERY, [
-      uniqueDids,
-    ])
+    const result = await this.database.query(IDENTITY_QUERY, [uniqueDids])
     const seenDids = new Set<string>()
 
     for (const row of result.rows) {

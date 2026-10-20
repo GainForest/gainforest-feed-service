@@ -135,16 +135,15 @@ const readBoundedRequest = async (
   const reader = request.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- The stream loop exits only when reader.read() reports done.
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    size += value.byteLength
+  let result = await reader.read()
+  while (!result.done) {
+    size += result.value.byteLength
     if (size > MAX_REQUEST_BODY_BYTES) {
       await reader.cancel('request body limit exceeded')
       return requestTooLargeResponse()
     }
-    chunks.push(value)
+    chunks.push(result.value)
+    result = await reader.read()
   }
 
   const body = new Uint8Array(size)

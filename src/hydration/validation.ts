@@ -1,8 +1,4 @@
-import {
-  isBlobRef,
-  jsonToLex as jsonToProtocolLex,
-  type BlobRef,
-} from '@atproto/lex'
+import { isBlobRef, lexParse, type BlobRef } from '@atproto/lex'
 import { jsonToLex as jsonToLegacyLex } from '@atproto/lexicon'
 import {
   AppCertifiedActorProfile,
@@ -36,12 +32,7 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 export const toProtocolBlobRef = (blob: unknown): BlobRef | undefined => {
   try {
     if (isBlobRef(blob)) return blob
-    // The JSON round-trip creates the parser's JsonValue input from indexed JSON.
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- jsonToLex performs strict validation before the value is used.
-    const json = JSON.parse(JSON.stringify(blob)) as Parameters<
-      typeof jsonToProtocolLex
-    >[0]
-    const parsed = jsonToProtocolLex(json, { strict: true })
+    const parsed = lexParse(JSON.stringify(blob), { strict: true })
     return isBlobRef(parsed) ? parsed : undefined
   } catch {
     return undefined

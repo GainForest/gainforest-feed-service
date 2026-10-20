@@ -20,17 +20,15 @@ export interface NormalizedPageParams {
   readonly cursor?: string
 }
 
-export interface SqlFeedQueryExecutor {
-  // The caller selects this row shape in SQL, so the generic is necessarily return-only.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- PostgreSQL result rows cannot be inferred from the query string.
-  query<Row extends QueryResultRow>(
+export interface SqlFeedQueryExecutor<Row extends QueryResultRow> {
+  query(
     text: string,
     values?: readonly unknown[],
   ): Promise<{ readonly rows: readonly Row[] }>
 }
 
-export interface SqlFeedRuntime {
-  readonly database: SqlFeedQueryExecutor
+export interface SqlFeedRuntime<Row extends QueryResultRow> {
+  readonly database: SqlFeedQueryExecutor<Row>
   readonly metrics: Metrics
 }
 
@@ -78,7 +76,7 @@ export const defineSqlFeed = <
   DatabaseRow extends QueryResultRow,
   FeedRow extends InternalFeedRow,
 >(
-  runtime: SqlFeedRuntime,
+  runtime: SqlFeedRuntime<DatabaseRow>,
   definition: SqlFeedDefinition<
     Params,
     Normalized,
@@ -159,7 +157,7 @@ export const defineSqlFeed = <
     const startedAt = performance.now()
     let result: { readonly rows: readonly DatabaseRow[] }
     try {
-      result = await runtime.database.query<DatabaseRow>(definition.sql, values)
+      result = await runtime.database.query(definition.sql, values)
     } finally {
       runtime.metrics.observeDatabase(
         'feed',

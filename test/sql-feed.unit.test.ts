@@ -54,7 +54,7 @@ interface ScoredFeedRow extends InternalFeedRow {
   readonly score: number
 }
 
-class FakeQueryExecutor implements SqlFeedQueryExecutor {
+class FakeQueryExecutor implements SqlFeedQueryExecutor<ScoredDatabaseRow> {
   readonly calls: {
     readonly text: string
     readonly values: readonly unknown[]
@@ -65,16 +65,13 @@ class FakeQueryExecutor implements SqlFeedQueryExecutor {
     private readonly failure?: Error,
   ) {}
 
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- Required by SqlFeedQueryExecutor's generic query contract.
-  query<Row extends QueryResultRow>(
+  query(
     text: string,
     values: readonly unknown[] = [],
-  ): Promise<{ readonly rows: readonly Row[] }> {
+  ): Promise<{ readonly rows: readonly ScoredDatabaseRow[] }> {
     this.calls.push({ text, values })
     if (this.failure !== undefined) return Promise.reject(this.failure)
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Fixtures model the concrete row specialization requested by defineSqlFeed.
-    const rows = this.rows as unknown as readonly Row[]
-    return Promise.resolve({ rows })
+    return Promise.resolve({ rows: this.rows })
   }
 }
 
@@ -150,7 +147,7 @@ const parseScoredParams = (input: FeedParams): ScoredParams => {
 }
 
 const createFeed = (
-  database: SqlFeedQueryExecutor,
+  database: SqlFeedQueryExecutor<ScoredDatabaseRow>,
   mapRow: FeedRowMapper<ScoredDatabaseRow, ScoredFeedRow> = mapScoredRow,
 ) =>
   defineSqlFeed(

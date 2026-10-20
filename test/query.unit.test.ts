@@ -1,4 +1,3 @@
-import type { QueryResultRow } from 'pg'
 import { describe, expect, it } from 'vitest'
 
 import { createHypercertsFeed } from '../src/feed/query.js'
@@ -14,27 +13,33 @@ const trustedLabeler = 'did:plc:ragtjsm2j2vknwkz3zp4oxrd'
 const uri = `at://${actorDid}/org.hypercerts.claim.activity/3kpn`
 const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
 
-class FakeQueryExecutor implements SqlFeedQueryExecutor {
+type HypercertsFeedQueryRow =
+  Parameters<
+    typeof createHypercertsFeed
+  >[0]['database'] extends SqlFeedQueryExecutor<infer Row>
+    ? Row
+    : never
+
+class FakeQueryExecutor implements SqlFeedQueryExecutor<HypercertsFeedQueryRow> {
   readonly calls: {
     readonly text: string
     readonly values: readonly unknown[]
   }[] = []
 
-  constructor(private readonly rows: readonly Record<string, unknown>[]) {}
+  constructor(private readonly rows: readonly HypercertsFeedQueryRow[]) {}
 
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- Required by SqlFeedQueryExecutor's generic query contract.
-  query<Row extends QueryResultRow>(
+  query(
     text: string,
     values: readonly unknown[] = [],
-  ): Promise<{ readonly rows: readonly Row[] }> {
+  ): Promise<{ readonly rows: readonly HypercertsFeedQueryRow[] }> {
     this.calls.push({ text, values })
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Fixture rows represent the concrete query result consumed by createHypercertsFeed.
-    const rows = this.rows as unknown as readonly Row[]
-    return Promise.resolve({ rows })
+    return Promise.resolve({ rows: this.rows })
   }
 }
 
-const resultRow = (overrides: Record<string, unknown> = {}) => ({
+const resultRow = (
+  overrides: Partial<HypercertsFeedQueryRow> = {},
+): HypercertsFeedQueryRow => ({
   uri,
   cid,
   collection: 'org.hypercerts.claim.activity',

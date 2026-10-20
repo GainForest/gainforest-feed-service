@@ -1,5 +1,4 @@
 import { jsonToLex, type JsonObject } from '@atproto/lex'
-import type { QueryResultRow } from 'pg'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -19,6 +18,10 @@ const didD = 'did:plc:cdefghijklmnopqrstuvwxyz'
 const blobCid = 'bafkreiehxpuhtr5f6v4eu4byjo2j7kkrhjvd7psmfu4imnpdzb3bdqb7vy'
 const createdAt = '2026-07-20T00:00:00.000Z'
 
+type IdentityQueryRow = Awaited<
+  ReturnType<IdentityQueryExecutor['query']>
+>['rows'][number]
+
 class FakeQueryExecutor implements IdentityQueryExecutor {
   readonly calls: {
     readonly text: string
@@ -26,20 +29,17 @@ class FakeQueryExecutor implements IdentityQueryExecutor {
   }[] = []
 
   constructor(
-    private readonly resultRows: readonly Record<string, unknown>[],
+    private readonly resultRows: readonly IdentityQueryRow[],
     private readonly failure?: Error,
   ) {}
 
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- Required by IdentityQueryExecutor's generic query contract.
-  query<T extends QueryResultRow>(
+  query(
     text: string,
     values: readonly unknown[] = [],
-  ): Promise<{ readonly rows: readonly T[] }> {
+  ): Promise<{ readonly rows: readonly IdentityQueryRow[] }> {
     this.calls.push({ text, values })
     if (this.failure !== undefined) return Promise.reject(this.failure)
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Fixtures model the IdentityQueryRow specialization requested by PostgresIdentityReader.
-    const rows = this.resultRows as unknown as readonly T[]
-    return Promise.resolve({ rows })
+    return Promise.resolve({ rows: this.resultRows })
   }
 }
 
@@ -68,8 +68,8 @@ const protocolValue = (value: JsonObject): unknown =>
 
 const identityResultRow = (
   requestedDid: string,
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> => ({
+  overrides: Partial<IdentityQueryRow> = {},
+): IdentityQueryRow => ({
   requested_did: requestedDid,
   certified_profile_json: null,
   ...overrides,

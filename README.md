@@ -269,13 +269,14 @@ You need Node.js 22.19+ and PostgreSQL 16+. The minimum Node.js version matches 
 
 ```bash
 npm install
-npm run codegen
+npm run lint
+npm run format:check
 npm run check
 npm run test:unit
 npm run build
 ```
 
-The committed project Lexicons in `lexicons/` define the public wire contract. `lexicons.json` pins active external Lexicon dependencies by AT-URI and CID; it currently includes `com.atproto.repo.strongRef`. The previously installed `app.bsky.actor.profile.json` file is intentionally preserved but is no longer an active dependency or used for identity hydration. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it. Codegen stages only the standard `org.hypercerts.defs#uri`, `#smallBlob`, `#smallImage`, and `#largeImage` fragments from the pinned `@hypercerts-org/lexicon` package. This keeps the feed from committing duplicate definitions. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
+The committed project Lexicons in `lexicons/` define the public wire contract. `lexicons.json` pins active external Lexicon dependencies by AT-URI and CID; it currently includes `com.atproto.repo.strongRef`. The previously installed `app.bsky.actor.profile.json` file is intentionally preserved but is no longer an active dependency or used for identity hydration. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it; `npm run lint` also does so through its `prelint` hook before typed linting. Codegen stages only the standard `org.hypercerts.defs#uri`, `#smallBlob`, `#smallImage`, and `#largeImage` fragments from the pinned `@hypercerts-org/lexicon` package. This keeps the feed from committing duplicate definitions. `npm run lint:fix` applies ESLint autofixes, and `npm run format` formats maintained TypeScript, MJS, Markdown, YAML, project configuration, and project-owned feed Lexicons. Generated and externally pinned Lexicons, the lockfile, and release changelogs are excluded. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
 
 Check the committed network Lexicons against the manifest with:
 
