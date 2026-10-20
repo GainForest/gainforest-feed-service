@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { FeedError, FeedErrorCode } from '../src/feed/errors.js'
+import { type FeedError, FeedErrorCode } from '../src/feed/errors.js'
 import type { HypercertsFeedParams } from '../src/feed/types.js'
 import { normalizeFeedRequest } from '../src/feed/validation.js'
 
@@ -39,7 +39,7 @@ describe('feed request validation', () => {
       normalizeFeedRequest(
         feedParams({ viewerDid: viewer, kinds: ['cert.creat'] }),
       ),
-    ).toThrowError(
+    ).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidRequest,
         status: 422,
@@ -54,7 +54,7 @@ describe('feed request validation', () => {
       normalizeFeedRequest(
         feedParams({ viewerDid: viewer, trustedEvaluators }),
       ),
-    ).toThrowError(
+    ).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidRequest,
         status: 422,
@@ -65,7 +65,7 @@ describe('feed request validation', () => {
   it('rejects empty event kind values', () => {
     expect(() =>
       normalizeFeedRequest(feedParams({ viewerDid: viewer, kinds: [''] })),
-    ).toThrowError(
+    ).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidRequest,
         status: 422,
@@ -81,12 +81,12 @@ describe('feed request validation', () => {
           feedParams({
             viewerDid: viewer,
             organizationQuality: {
-              allowed: [quality as 'standard'],
+              allowed: [quality],
               includeUnrated: false,
             },
           }),
         ),
-      ).toThrowError(
+      ).toThrow(
         expect.objectContaining<Partial<FeedError>>({
           code: FeedErrorCode.InvalidRequest,
         }),
@@ -97,14 +97,14 @@ describe('feed request validation', () => {
   it('rejects malformed viewers and page sizes', () => {
     expect(() =>
       normalizeFeedRequest(feedParams({ viewerDid: 'alice.test' })),
-    ).toThrowError(
+    ).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidRequest,
       }),
     )
     expect(() =>
       normalizeFeedRequest(feedParams({ viewerDid: viewer }), { limit: 51 }),
-    ).toThrowError(
+    ).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidRequest,
       }),

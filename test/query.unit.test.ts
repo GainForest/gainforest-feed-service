@@ -15,19 +15,22 @@ const uri = `at://${actorDid}/org.hypercerts.claim.activity/3kpn`
 const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
 
 class FakeQueryExecutor implements SqlFeedQueryExecutor {
-  readonly calls: Array<{
+  readonly calls: {
     readonly text: string
     readonly values: readonly unknown[]
-  }> = []
+  }[] = []
 
   constructor(private readonly rows: readonly Record<string, unknown>[]) {}
 
-  async query<Row extends QueryResultRow>(
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- Required by SqlFeedQueryExecutor's generic query contract.
+  query<Row extends QueryResultRow>(
     text: string,
     values: readonly unknown[] = [],
   ): Promise<{ readonly rows: readonly Row[] }> {
     this.calls.push({ text, values })
-    return { rows: this.rows as unknown as readonly Row[] }
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Fixture rows represent the concrete query result consumed by createHypercertsFeed.
+    const rows = this.rows as unknown as readonly Row[]
+    return Promise.resolve({ rows })
   }
 }
 
@@ -101,11 +104,16 @@ describe('Hypercerts SQL feed definition', () => {
     const database = new FakeQueryExecutor([])
     const feed = createHypercertsFeed({ database, metrics: new Metrics() }, [])
 
-    await expect(
-      feed.loadPage({ $type: paramsType }, {}, 'metadata'),
-    ).rejects.toMatchObject({
+    const invalidViewerRequest = feed.loadPage(
+      { $type: paramsType },
+      {},
+      'metadata',
+    )
+    await expect(invalidViewerRequest).rejects.toThrow(
+      /viewerDid is not a valid DID/,
+    )
+    await expect(invalidViewerRequest).rejects.toMatchObject({
       code: 'InvalidRequest',
-      message: expect.stringContaining('viewerDid is not a valid DID'),
     })
     await expect(
       feed.loadPage(

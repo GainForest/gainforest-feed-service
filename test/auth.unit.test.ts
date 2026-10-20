@@ -1,12 +1,20 @@
 import { P256Keypair, bytesToMultibase } from '@atproto/crypto'
 import { LexServerAuthError } from '@atproto/lex-server'
-import type { DidResolver } from '@atproto-labs/did-resolver'
+import type {
+  AtprotoIdentityDidMethods,
+  Did,
+  DidResolver,
+  ResolvedDocument,
+} from '@atproto-labs/did-resolver'
 import { describe, expect, it, vi } from 'vitest'
 
 import {
   createOptionalServiceAuth,
+  type OptionalServiceAuth,
   type ServiceAuthCredentials,
 } from '../src/auth/service-auth.js'
+import { main as hydratedMethod } from '../src/lexicons/org/hypercerts/feed/getFeed.defs.js'
+import { main as skeletonMethod } from '../src/lexicons/org/hypercerts/feed/getFeedSkeleton.defs.js'
 
 const issuerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const otherIssuerDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
@@ -19,7 +27,15 @@ let nextJti = 0
 
 const now = (): number => Math.floor(Date.now() / 1_000)
 
-const freshJti = (): string => `test-jti-${++nextJti}`
+const freshJti = (): string => `test-jti-${String(++nextJti)}`
+
+const itemAt = <T>(items: readonly T[], index: number): T => {
+  const item = items[index]
+  if (item === undefined) {
+    throw new Error(`Expected a test fixture at index ${String(index)}`)
+  }
+  return item
+}
 
 const encode = (value: unknown): string =>
   Buffer.from(JSON.stringify(value)).toString('base64url')
@@ -44,32 +60,38 @@ const signedJwt = async (
 
 const resolverForMany = (
   ...entries: readonly (readonly [string, P256Keypair])[]
-): DidResolver<any> =>
-  ({
-    resolve: async (did: string) => {
-      const entry = entries.find(([entryDid]) => entryDid === did)
-      if (entry === undefined) throw new Error('unknown test issuer')
+): DidResolver<AtprotoIdentityDidMethods> => ({
+  resolve: <D extends Did>(
+    did: D,
+  ): Promise<ResolvedDocument<D, AtprotoIdentityDidMethods>> => {
+    const entry = entries.find(([entryDid]) => entryDid === did)
+    if (entry === undefined) {
+      return Promise.reject(new Error('unknown test issuer'))
+    }
 
-      const [resolvedDid, keypair] = entry
-      return {
-        id: resolvedDid,
-        verificationMethod: [
-          {
-            id: `${resolvedDid}#atproto`,
-            type: 'EcdsaSecp256r1VerificationKey2019',
-            controller: resolvedDid,
-            publicKeyMultibase: bytesToMultibase(
-              keypair.publicKeyBytes(),
-              'base58btc',
-            ),
-          },
-        ],
-      }
-    },
-  }) as unknown as DidResolver<any>
+    const [, keypair] = entry
+    // @ts-expect-error -- DidResolver's conditional return type cannot correlate D with this matching fixture document.
+    return Promise.resolve({
+      id: did,
+      verificationMethod: [
+        {
+          id: `${did}#atproto`,
+          type: 'EcdsaSecp256r1VerificationKey2019',
+          controller: did,
+          publicKeyMultibase: bytesToMultibase(
+            keypair.publicKeyBytes(),
+            'base58btc',
+          ),
+        },
+      ],
+    })
+  },
+})
 
-const resolverFor = (keypair: P256Keypair, did = issuerDid): DidResolver<any> =>
-  resolverForMany([did, keypair])
+const resolverFor = (
+  keypair: P256Keypair,
+  did = issuerDid,
+): DidResolver<AtprotoIdentityDidMethods> => resolverForMany([did, keypair])
 
 const authRequest = (authorization: string | undefined): Request =>
   new Request('http://localhost/xrpc/test', {
@@ -79,9 +101,9 @@ const authRequest = (authorization: string | undefined): Request =>
 const authContext = (
   authorization: string | undefined,
   nsid = skeletonNsid,
-) => ({
+): Parameters<OptionalServiceAuth>[0] => ({
   request: authRequest(authorization),
-  method: { nsid } as any,
+  method: nsid === hydratedNsid ? hydratedMethod : skeletonMethod,
   params: {},
 })
 
@@ -132,7 +154,7 @@ describe('optional AT Protocol service authentication', () => {
       'wrong lxm',
       async (keypair: P256Keypair) => signedJwt(keypair, { lxm: hydratedNsid }),
     ],
-  ])('rejects %s without anonymous fallback', async (label, makeToken) => {
+  ])('rejects %s without anonymous fallback', async (_label, makeToken) => {
     const keypair = await P256Keypair.create()
     const auth = createOptionalServiceAuth({
       audience: serviceDid,
@@ -271,7 +293,7 @@ describe('optional AT Protocol service authentication', () => {
         Array.from({ length: 513 }, (_, index) =>
           signedJwt(firstKeypair, {
             exp: now() + 1,
-            jti: `first-issuer-jti-${index}`,
+            jti: `first-issuer-jti-${String(index)}`,
           }),
         ),
       )
@@ -283,19 +305,20 @@ describe('optional AT Protocol service authentication', () => {
           did: issuerDid,
         })
       }
-      await expect(
-        auth(authContext(`Bearer ${firstTokens[512]}`)),
-      ).rejects.toMatchObject({
+      const issuerOverflow = auth(
+        authContext(`Bearer ${itemAt(firstTokens, 512)}`),
+      )
+      await expect(issuerOverflow).rejects.toThrow('issuer')
+      await expect(issuerOverflow).rejects.toMatchObject({
         error: 'InternalError',
         status: 503,
-        message: expect.stringContaining('issuer'),
       })
 
       const secondTokens = await Promise.all(
         Array.from({ length: 512 }, (_, index) =>
           signedJwt(secondKeypair, {
             iss: otherIssuerDid,
-            jti: `second-issuer-jti-${index}`,
+            jti: `second-issuer-jti-${String(index)}`,
           }),
         ),
       )
@@ -452,13 +475,13 @@ describe('optional AT Protocol service authentication', () => {
       const resolutionReleased = new Promise<void>((resolve) => {
         releaseResolution = resolve
       })
-      const resolver = {
-        resolve: async () => {
+      const resolver: DidResolver<AtprotoIdentityDidMethods> = {
+        resolve: async (did) => {
           markResolutionStarted()
           await resolutionReleased
-          return resolverFor(keypair).resolve(issuerDid)
+          return resolverFor(keypair).resolve(did)
         },
-      } as unknown as DidResolver<any>
+      }
       const auth = createOptionalServiceAuth({
         audience: serviceDid,
         didResolver: resolver,
@@ -529,17 +552,20 @@ describe('optional AT Protocol service authentication', () => {
         audience: serviceDid,
         didResolver: resolverForMany(
           ...capacityIssuerDids.map(
-            (did, index) => [did, capacityKeypairs[index]!] as const,
+            (did, index): readonly [string, P256Keypair] => [
+              did,
+              itemAt(capacityKeypairs, index),
+            ],
           ),
         ),
       })
       const tokens = await Promise.all(
         Array.from({ length: 4_096 }, (_, index) => {
           const issuerIndex = Math.floor(index / 512)
-          return signedJwt(capacityKeypairs[issuerIndex]!, {
-            iss: capacityIssuerDids[issuerIndex],
+          return signedJwt(itemAt(capacityKeypairs, issuerIndex), {
+            iss: itemAt(capacityIssuerDids, issuerIndex),
             exp: now() + 60,
-            jti: `capacity-jti-${index}`,
+            jti: `capacity-jti-${String(index)}`,
           })
         }),
       )
@@ -548,25 +574,24 @@ describe('optional AT Protocol service authentication', () => {
         await auth(authContext(`Bearer ${token}`))
       }
 
-      const overflowToken = await signedJwt(capacityKeypairs[8]!, {
-        iss: capacityIssuerDids[8],
+      const overflowToken = await signedJwt(itemAt(capacityKeypairs, 8), {
+        iss: itemAt(capacityIssuerDids, 8),
         jti: 'overflow-jti',
       })
-      await expect(
-        auth(authContext(`Bearer ${overflowToken}`)),
-      ).rejects.toMatchObject({
+      const globalOverflow = auth(authContext(`Bearer ${overflowToken}`))
+      await expect(globalOverflow).rejects.toThrow('at capacity')
+      await expect(globalOverflow).rejects.toMatchObject({
         error: 'InternalError',
         status: 503,
-        message: expect.stringContaining('at capacity'),
       })
       await expect(
-        auth(authContext(`Bearer ${tokens[0]}`)),
+        auth(authContext(`Bearer ${itemAt(tokens, 0)}`)),
       ).rejects.toMatchObject({
         wwwAuthenticate: { Bearer: { error: 'NonceNotUnique' } },
       })
 
       vi.setSystemTime(baseTimeMs + 61_000)
-      const freshToken = await signedJwt(capacityKeypairs[0]!, {
+      const freshToken = await signedJwt(itemAt(capacityKeypairs, 0), {
         exp: now() + 60,
         jti: 'after-purge-jti',
       })
@@ -576,7 +601,7 @@ describe('optional AT Protocol service authentication', () => {
 
       vi.setSystemTime(baseTimeMs + 60_500)
       await expect(
-        auth(authContext(`Bearer ${tokens[0]}`)),
+        auth(authContext(`Bearer ${itemAt(tokens, 0)}`)),
       ).rejects.toMatchObject({
         error: 'AuthenticationRequired',
         message: 'JWT token expired',

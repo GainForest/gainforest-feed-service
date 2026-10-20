@@ -1,4 +1,4 @@
-import { jsonToLex, type BlobRef } from '@atproto/lex'
+import { lexParse, type BlobRef } from '@atproto/lex'
 import { LexServerAuthError } from '@atproto/lex-server'
 import { createServer } from '@atproto/lex-server/nodejs'
 import type { AddressInfo } from 'node:net'
@@ -25,36 +25,66 @@ const viewer = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const actor = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
 const uri = `at://${actor}/org.hypercerts.claim.activity/3kpn`
 const blobCid = 'bafkreiehxpuhtr5f6v4eu4byjo2j7kkrhjvd7psmfu4imnpdzb3bdqb7vy'
-const avatarBlob = jsonToLex(
-  {
+const avatarBlob = lexParse<BlobRef>(
+  JSON.stringify({
     $type: 'blob',
     ref: { $link: blobCid },
     mimeType: 'image/png',
     size: 128,
-  },
+  }),
   { strict: true },
-) as BlobRef
+)
 const logger = pino({ enabled: false })
 
 const skeletonPath = 'http://localhost/xrpc/org.hypercerts.feed.getFeedSkeleton'
 const hydratedPath = 'http://localhost/xrpc/org.hypercerts.feed.getFeed'
 
 const compatibleDatabase: DatabaseCompatibilityChecker = {
-  checkCompatibility: vi.fn(async () => ({ compatible: true })),
+  checkCompatibility: vi.fn(() => Promise.resolve({ compatible: true })),
 }
 
 const emptySkeleton = (): FeedSkeletonReader => ({
-  getFeedSkeleton: vi.fn(async () => ({ feed: [] })),
+  getFeedSkeleton: vi.fn(() => Promise.resolve({ feed: [] })),
 })
 
 const emptyHydrated = (): HydratedFeedReader => ({
-  getFeed: vi.fn(async () => ({ feed: [] })),
+  getFeed: vi.fn(() => Promise.resolve({ feed: [] })),
 })
 
 const appServices = (
   skeleton: FeedSkeletonReader = emptySkeleton(),
   hydrated: HydratedFeedReader = emptyHydrated(),
 ): AppFeedServices => ({ skeleton, hydrated })
+
+type JsonObject = Record<string, unknown>
+
+const isJsonObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const expectErrorResponse = async (
+  response: Response,
+  expectedError: string,
+  messageIncludes?: string,
+): Promise<void> => {
+  const value: unknown = await response.json()
+  if (!isJsonObject(value)) throw new Error('Expected a JSON error object')
+  expect(value.error).toBe(expectedError)
+  if (messageIncludes === undefined) return
+  if (typeof value.message !== 'string') {
+    throw new Error('Expected the error response to include a message')
+  }
+  expect(value.message).toContain(messageIncludes)
+}
+
+const serverAddress = (
+  server: ReturnType<typeof createServer>,
+): AddressInfo => {
+  const address = server.address()
+  if (address === null || typeof address === 'string') {
+    throw new Error('Expected the test server to have a TCP address')
+  }
+  return address
+}
 
 const feedRequest = (viewerDid = viewer): GetFeedSkeletonInput => ({
   feedId: HYPERCERTS_FEED_ID,
@@ -65,37 +95,44 @@ const post = (
   url: string,
   body: string,
   extraHeaders: HeadersInit = {},
-): Request =>
-  new Request(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...extraHeaders },
-    body,
+): Request => {
+  const headers = new Headers({ 'content-type': 'application/json' })
+  new Headers(extraHeaders).forEach((value, key) => {
+    headers.set(key, value)
   })
+  return new Request(url, { method: 'POST', headers, body })
+}
 
-const trustedCredentials = (did: string): ServiceAuthCredentials =>
-  ({ did }) as ServiceAuthCredentials
+const trustedCredentials = (did: string): ServiceAuthCredentials => {
+  // The app boundary needs only the verified issuer; auth.unit.test.ts covers full JWT verification.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Deliberately minimal credentials fixture for DID-binding tests.
+  return { did } as unknown as ServiceAuthCredentials
+}
 
-const authFor = (
-  credentials: ServiceAuthCredentials | undefined,
-  invalidToken = false,
-): OptionalServiceAuth =>
-  vi.fn(async ({ request }) => {
+const authFor =
+  (
+    credentials: ServiceAuthCredentials | undefined,
+    invalidToken = false,
+  ): OptionalServiceAuth =>
+  ({ request }) => {
     if (invalidToken && request.headers.has('authorization')) {
-      throw new LexServerAuthError(
-        'AuthenticationRequired',
-        'Invalid bearer token',
-        { Bearer: { error: 'InvalidToken' } },
+      return Promise.reject(
+        new LexServerAuthError(
+          'AuthenticationRequired',
+          'Invalid bearer token',
+          { Bearer: { error: 'InvalidToken' } },
+        ),
       )
     }
-    return credentials
-  })
+    return Promise.resolve(credentials)
+  }
 
 describe('HTTP application', () => {
   it('keeps authentication usable after a real HTTP POST body has been read', async () => {
-    const auth: OptionalServiceAuth = async ({ request }) => {
+    const auth: OptionalServiceAuth = ({ request }) => {
       request.signal.throwIfAborted()
       expect(request.headers.get('authorization')).toBe('Bearer test-token')
-      return trustedCredentials(viewer)
+      return Promise.resolve(trustedCredentials(viewer))
     }
     const app = createApp(
       compatibleDatabase,
@@ -111,13 +148,13 @@ describe('HTTP application', () => {
     })
 
     try {
-      const address = server.address() as AddressInfo
+      const address = serverAddress(server)
       for (const method of [
         'org.hypercerts.feed.getFeedSkeleton',
         'org.hypercerts.feed.getFeed',
       ]) {
         const response = await fetch(
-          `http://127.0.0.1:${address.port}/xrpc/${method}`,
+          `http://127.0.0.1:${String(address.port)}/xrpc/${method}`,
           {
             method: 'POST',
             headers: {
@@ -136,7 +173,10 @@ describe('HTTP application', () => {
       }
     } finally {
       await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()))
+        server.close((error) => {
+          if (error !== undefined) reject(error)
+          else resolve()
+        })
       })
     }
   })
@@ -272,9 +312,9 @@ describe('HTTP application', () => {
   it('serves the generic skeleton POST procedure', async () => {
     let received: GetFeedSkeletonInput | undefined
     const skeleton: FeedSkeletonReader = {
-      getFeedSkeleton: vi.fn(async (input) => {
+      getFeedSkeleton: vi.fn((input: GetFeedSkeletonInput) => {
         received = input
-        return { feed: [{ subject: uri }] }
+        return Promise.resolve({ feed: [{ subject: uri }] })
       }),
     }
     const app = createApp(
@@ -303,15 +343,15 @@ describe('HTTP application', () => {
     async (_label, url) => {
       let received: GetFeedSkeletonInput | undefined
       const skeleton: FeedSkeletonReader = {
-        getFeedSkeleton: vi.fn(async (input) => {
+        getFeedSkeleton: vi.fn((input: GetFeedSkeletonInput) => {
           received = input
-          return { feed: [] }
+          return Promise.resolve({ feed: [] })
         }),
       }
       const hydrated: HydratedFeedReader = {
-        getFeed: vi.fn(async (input) => {
+        getFeed: vi.fn((input: GetFeedSkeletonInput) => {
           received = input
-          return { feed: [] }
+          return Promise.resolve({ feed: [] })
         }),
       }
       const app = createApp(
@@ -366,10 +406,11 @@ describe('HTTP application', () => {
       expect(response.status).toBe(400)
       expect(getFeedSkeleton).not.toHaveBeenCalled()
       expect(getFeed).not.toHaveBeenCalled()
-      await expect(response.json()).resolves.toMatchObject({
-        error: 'InvalidRequest',
-        message: expect.stringContaining('does not match the authenticated'),
-      })
+      await expectErrorResponse(
+        response,
+        'InvalidRequest',
+        'does not match the authenticated',
+      )
     },
   )
 
@@ -402,10 +443,11 @@ describe('HTTP application', () => {
       expect(response.status).toBe(400)
       expect(getFeedSkeleton).not.toHaveBeenCalled()
       expect(getFeed).not.toHaveBeenCalled()
-      await expect(response.json()).resolves.toMatchObject({
-        error: 'InvalidRequest',
-        message: expect.stringContaining('required for anonymous requests'),
-      })
+      await expectErrorResponse(
+        response,
+        'InvalidRequest',
+        'required for anonymous requests',
+      )
     },
   )
 
@@ -442,9 +484,9 @@ describe('HTTP application', () => {
   it('serves the unauthenticated hydrated POST procedure', async () => {
     let received: GetFeedSkeletonInput | undefined
     const hydrated: HydratedFeedReader = {
-      getFeed: vi.fn(async (input) => {
+      getFeed: vi.fn((input: GetFeedSkeletonInput) => {
         received = input
-        return {
+        return Promise.resolve({
           feed: [
             {
               subject: uri,
@@ -466,7 +508,7 @@ describe('HTTP application', () => {
               },
             },
           ],
-        }
+        })
       }),
     }
     const app = createApp(
@@ -575,10 +617,7 @@ describe('HTTP application', () => {
 
     expect(response.status).toBe(400)
     expect(response.headers.get('access-control-allow-origin')).toBe('*')
-    await expect(response.json()).resolves.toMatchObject({
-      error: 'InvalidRequest',
-      message: expect.stringContaining(message),
-    })
+    await expectErrorResponse(response, 'InvalidRequest', message)
     const metricText = await metrics.registry.metrics()
     expect(metricText).toContain(
       'hypercerts_feed_errors_total{error="InvalidRequest"} 1',
@@ -687,10 +726,7 @@ describe('HTTP application', () => {
       expect(response.headers.get('access-control-allow-origin')).toBe('*')
       expect(getFeedSkeleton).not.toHaveBeenCalled()
       expect(getFeed).not.toHaveBeenCalled()
-      await expect(response.json()).resolves.toMatchObject({
-        error: 'InvalidRequest',
-        message: expect.stringContaining('not valid JSON'),
-      })
+      await expectErrorResponse(response, 'InvalidRequest', 'not valid JSON')
     },
   )
 
@@ -794,32 +830,34 @@ describe('HTTP application', () => {
       'skeleton',
       skeletonPath,
       appServices({
-        getFeedSkeleton: vi.fn(async () => ({
-          feed: [{ subject: 'not-an-at-uri' }],
-        })),
+        getFeedSkeleton: vi.fn(() =>
+          Promise.resolve({ feed: [{ subject: 'not-an-at-uri' }] }),
+        ),
       }),
     ],
     [
       'hydrated',
       hydratedPath,
       appServices(emptySkeleton(), {
-        getFeed: vi.fn(async () => ({
-          feed: [
-            {
-              subject: 'not-an-at-uri',
-              view: {
-                $type: 'org.hypercerts.feed.defs#hypercertsFeedView' as const,
-                kind: 'cert.create' as const,
-                actor: { did: 'not-a-did' },
-                content: {
-                  $type: 'org.hypercerts.feed.defs#activityView' as const,
-                  title: 'Invalid response fixture',
-                  locationCount: 0,
+        getFeed: vi.fn(() =>
+          Promise.resolve({
+            feed: [
+              {
+                subject: 'not-an-at-uri',
+                view: {
+                  $type: 'org.hypercerts.feed.defs#hypercertsFeedView' as const,
+                  kind: 'cert.create' as const,
+                  actor: { did: 'not-a-did' },
+                  content: {
+                    $type: 'org.hypercerts.feed.defs#activityView' as const,
+                    title: 'Invalid response fixture',
+                    locationCount: 0,
+                  },
                 },
               },
-            },
-          ],
-        })),
+            ],
+          }),
+        ),
       }),
     ],
   ])(
@@ -850,10 +888,7 @@ describe('HTTP application', () => {
     const response = await app.fetch(post(url, '{}'))
 
     expect(response.status).toBe(400)
-    await expect(response.json()).resolves.toMatchObject({
-      error: 'InvalidRequest',
-      message: expect.stringContaining(nsid),
-    })
+    await expectErrorResponse(response, 'InvalidRequest', nsid)
   })
 
   it.each([
@@ -878,10 +913,7 @@ describe('HTTP application', () => {
       expect(response.status).toBe(400)
       expect(getFeedSkeleton).not.toHaveBeenCalled()
       expect(getFeed).not.toHaveBeenCalled()
-      await expect(response.json()).resolves.toMatchObject({
-        error: 'InvalidRequest',
-        message: expect.stringContaining('Invalid DID'),
-      })
+      await expectErrorResponse(response, 'InvalidRequest', 'Invalid DID')
     },
   )
 
@@ -890,24 +922,28 @@ describe('HTTP application', () => {
       'skeleton',
       skeletonPath,
       appServices({
-        getFeedSkeleton: vi.fn(async () => {
-          throw new FeedError(
-            FeedErrorCode.UnsupportedFeed,
-            'The requested feed is not supported.',
-          )
-        }),
+        getFeedSkeleton: vi.fn(() =>
+          Promise.reject(
+            new FeedError(
+              FeedErrorCode.UnsupportedFeed,
+              'The requested feed is not supported.',
+            ),
+          ),
+        ),
       }),
     ],
     [
       'hydrated',
       hydratedPath,
       appServices(emptySkeleton(), {
-        getFeed: vi.fn(async () => {
-          throw new FeedError(
-            FeedErrorCode.UnsupportedFeed,
-            'The requested feed is not supported.',
-          )
-        }),
+        getFeed: vi.fn(() =>
+          Promise.reject(
+            new FeedError(
+              FeedErrorCode.UnsupportedFeed,
+              'The requested feed is not supported.',
+            ),
+          ),
+        ),
       }),
     ],
   ])(
@@ -934,12 +970,11 @@ describe('HTTP application', () => {
 
   it('counts a route-generated InvalidRequest only once', async () => {
     const metrics = new Metrics()
-    const getFeedSkeleton = vi.fn(async () => {
-      throw new FeedError(
-        FeedErrorCode.InvalidRequest,
-        'The request is invalid.',
-      )
-    })
+    const getFeedSkeleton = vi.fn(() =>
+      Promise.reject(
+        new FeedError(FeedErrorCode.InvalidRequest, 'The request is invalid.'),
+      ),
+    )
     const app = createApp(
       compatibleDatabase,
       appServices({ getFeedSkeleton }),
@@ -959,13 +994,15 @@ describe('HTTP application', () => {
   })
 
   it('translates expected skeleton InvalidRequest details', async () => {
-    const getFeedSkeleton = vi.fn(async () => {
-      throw new FeedError(
-        FeedErrorCode.InvalidRequest,
-        'Reduce trustedEvaluators before retrying.',
-        422,
-      )
-    })
+    const getFeedSkeleton = vi.fn(() =>
+      Promise.reject(
+        new FeedError(
+          FeedErrorCode.InvalidRequest,
+          'Reduce trustedEvaluators before retrying.',
+          422,
+        ),
+      ),
+    )
     const app = createApp(
       compatibleDatabase,
       appServices({ getFeedSkeleton }),
@@ -986,14 +1023,16 @@ describe('HTTP application', () => {
 
   it('translates expected hydrated FeedError details without leaking its cause', async () => {
     const internalCause = new Error('secret database detail')
-    const getFeed = vi.fn(async () => {
-      throw new FeedError(
-        FeedErrorCode.InvalidRequest,
-        'Reduce trustedEvaluators before retrying.',
-        422,
-        { cause: internalCause },
-      )
-    })
+    const getFeed = vi.fn(() =>
+      Promise.reject(
+        new FeedError(
+          FeedErrorCode.InvalidRequest,
+          'Reduce trustedEvaluators before retrying.',
+          422,
+          { cause: internalCause },
+        ),
+      ),
+    )
     const app = createApp(
       compatibleDatabase,
       appServices(emptySkeleton(), { getFeed }),
@@ -1016,9 +1055,9 @@ describe('HTTP application', () => {
   })
 
   it('redacts unknown hydrated failures and records bounded route/error metrics', async () => {
-    const getFeed = vi.fn(async () => {
-      throw new Error('secret hydrated failure')
-    })
+    const getFeed = vi.fn(() =>
+      Promise.reject(new Error('secret hydrated failure')),
+    )
     const metrics = new Metrics()
     const app = createApp(
       compatibleDatabase,
@@ -1061,10 +1100,12 @@ describe('HTTP application', () => {
 
   it('reports readiness failures without marking the process unhealthy', async () => {
     const database: DatabaseCompatibilityChecker = {
-      checkCompatibility: vi.fn(async () => ({
-        compatible: false,
-        reason: 'database readiness capability check failed',
-      })),
+      checkCompatibility: vi.fn(() =>
+        Promise.resolve({
+          compatible: false,
+          reason: 'database readiness capability check failed',
+        }),
+      ),
     }
     const app = createApp(database, appServices(), new Metrics(), logger)
 

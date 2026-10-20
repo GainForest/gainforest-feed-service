@@ -1,4 +1,4 @@
-import { jsonToLex } from '@atproto/lex'
+import { jsonToLex, type JsonObject } from '@atproto/lex'
 import { describe, expect, it } from 'vitest'
 
 import { FEED_KINDS, type FeedKind } from '../src/feed/types.js'
@@ -20,28 +20,23 @@ const secondBlobCid =
 const createdAt = '2026-07-20T00:00:00.000Z'
 const targetUri = `at://${subjectDid}/org.hypercerts.claim.activity/target`
 
-const strongRef = (
-  uri = targetUri,
-  valueCid = cid,
-): Record<string, unknown> => ({
+const strongRef = (uri = targetUri, valueCid = cid): JsonObject => ({
   $type: 'com.atproto.repo.strongRef',
   uri,
   cid: valueCid,
 })
 
-const didSubject = (did = subjectDid): Record<string, unknown> => ({
+const didSubject = (did = subjectDid): JsonObject => ({
   $type: 'app.certified.defs#did',
   did,
 })
 
-const uriImage = (uri: string): Record<string, unknown> => ({
+const uriImage = (uri: string): JsonObject => ({
   $type: 'org.hypercerts.defs#uri',
   uri,
 })
 
-const smallImage = (
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> => ({
+const smallImage = (overrides: JsonObject = {}): JsonObject => ({
   $type: 'org.hypercerts.defs#smallImage',
   image: {
     $type: 'blob',
@@ -52,9 +47,7 @@ const smallImage = (
   },
 })
 
-const largeImage = (
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> => ({
+const largeImage = (overrides: JsonObject = {}): JsonObject => ({
   $type: 'org.hypercerts.defs#largeImage',
   image: {
     $type: 'blob',
@@ -68,8 +61,8 @@ const largeImage = (
 const smallBlob = (
   mimeType: string,
   valueCid = blobCid,
-  overrides: Record<string, unknown> = {},
-): Record<string, unknown> => ({
+  overrides: JsonObject = {},
+): JsonObject => ({
   $type: 'org.hypercerts.defs#smallBlob',
   blob: {
     $type: 'blob',
@@ -80,8 +73,8 @@ const smallBlob = (
   },
 })
 
-const protocolValue = (value: unknown): unknown =>
-  jsonToLex(value as Parameters<typeof jsonToLex>[0], { strict: true })
+const protocolValue = (value: JsonObject): unknown =>
+  jsonToLex(value, { strict: true })
 
 const records = {
   activity: {
@@ -381,9 +374,10 @@ describe('top-level record validation', () => {
   })
 
   it('preserves the original indexed JSON while views consume parsed validated data', () => {
-    const raw = JSON.parse(
-      JSON.stringify({ ...records.activity, image: smallImage() }),
-    )
+    const raw: JsonObject = {
+      ...records.activity,
+      image: smallImage(),
+    }
     const result = validated(
       'cert.create',
       'org.hypercerts.claim.activity',
@@ -393,7 +387,7 @@ describe('top-level record validation', () => {
     expect(result.rawValue).toBe(raw)
     expect(result.value).not.toBe(raw)
     expect(result.value.image).not.toBe(raw.image)
-    expect(raw.image.image.ref).toEqual({ $link: blobCid })
+    expect(raw.image).toMatchObject({ image: { ref: { $link: blobCid } } })
 
     raw.title = 'Mutated after validation'
     raw.shortDescription = 'Mutated after validation'

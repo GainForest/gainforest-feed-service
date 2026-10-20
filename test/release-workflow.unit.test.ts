@@ -9,20 +9,27 @@ const readOptionalFile = (path: string): string => {
   }
 }
 
-const packageJson = JSON.parse(readFileSync('package.json', 'utf8')) as {
-  private?: boolean
-  engines?: { node?: string }
-  scripts: Record<string, string>
+type JsonObject = Record<string, unknown>
+
+const isJsonObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const parseJsonObject = (source: string): JsonObject => {
+  const value: unknown = JSON.parse(source)
+  if (!isJsonObject(value)) throw new Error('Expected a JSON object')
+  return value
 }
+
+const objectAt = (value: JsonObject, key: string): JsonObject => {
+  const child = value[key]
+  if (!isJsonObject(child)) throw new Error(`Expected ${key} to be an object`)
+  return child
+}
+
+const packageJson = parseJsonObject(readFileSync('package.json', 'utf8'))
 const changesetsConfig = (() => {
   const source = readOptionalFile('.changeset/config.json')
-  return source === ''
-    ? {}
-    : (JSON.parse(source) as {
-        baseBranch?: string
-        changelog?: [string, { repo?: string }]
-        privatePackages?: { version?: boolean; tag?: boolean }
-      })
+  return source === '' ? {} : parseJsonObject(source)
 })()
 const ciWorkflow = readOptionalFile('.github/workflows/ci.yml')
 const releaseWorkflow = readOptionalFile('.github/workflows/release.yml')
@@ -38,11 +45,12 @@ const workflowStep = (source: string, name: string): string => {
 describe('release workflow', () => {
   test('configures Changesets for private GitHub releases from main', () => {
     expect(packageJson.private).toBe(true)
-    expect(packageJson.engines?.node).toBe('>=22.19.0')
-    expect(packageJson.scripts['changeset']).toBe('changeset')
-    expect(packageJson.scripts['changeset:empty']).toBe('changeset --empty')
-    expect(packageJson.scripts['changeset:status']).toBe('changeset status')
-    expect(packageJson.scripts['version:packages']).toBe(
+    expect(objectAt(packageJson, 'engines').node).toBe('>=22.19.0')
+    const scripts = objectAt(packageJson, 'scripts')
+    expect(scripts.changeset).toBe('changeset')
+    expect(scripts['changeset:empty']).toBe('changeset --empty')
+    expect(scripts['changeset:status']).toBe('changeset status')
+    expect(scripts['version:packages']).toBe(
       'changeset version && npm install --package-lock-only --ignore-scripts',
     )
     expect(changesetsConfig).toMatchObject({
@@ -56,7 +64,7 @@ describe('release workflow', () => {
   })
 
   test('allows omission and validates Changeset fragments when present', () => {
-    expect(ciWorkflow).toMatch(/^  workflow_dispatch:/m)
+    expect(ciWorkflow).toMatch(/^ {2}workflow_dispatch:/m)
     expect(workflowStep(ciWorkflow, 'Validate changesets when present'))
       .toBe(`      - name: Validate changesets when present
         if: github.event_name == 'pull_request'

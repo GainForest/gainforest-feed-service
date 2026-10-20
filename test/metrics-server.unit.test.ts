@@ -14,8 +14,18 @@ const servers: ReturnType<typeof createMetricsServer>[] = []
 const createTestMetricsServer = (metrics = new Metrics()) =>
   createMetricsServer(metrics, {
     requestTimeoutMs: 1_000,
-    onError: () => {},
+    onError: () => undefined,
   })
+
+const listenerAddress = (
+  server: ReturnType<typeof createMetricsServer>,
+): AddressInfo => {
+  const address = server.address()
+  if (address === null || typeof address === 'string') {
+    throw new Error('Expected the test server to have a TCP address')
+  }
+  return address
+}
 
 const listen = async (
   server: ReturnType<typeof createMetricsServer>,
@@ -25,15 +35,15 @@ const listen = async (
     server.once('error', reject)
     server.listen(0, '127.0.0.1', resolve)
   })
-  const address = server.address() as AddressInfo
-  return `http://127.0.0.1:${address.port}`
+  const address = listenerAddress(server)
+  return `http://127.0.0.1:${String(address.port)}`
 }
 
 const sendRawRequest = async (
   server: ReturnType<typeof createMetricsServer>,
   target: string,
 ): Promise<string> => {
-  const address = server.address() as AddressInfo
+  const address = listenerAddress(server)
   return new Promise<string>((resolve, reject) => {
     let response = ''
     const socket = connect(address.port, '127.0.0.1', () => {
@@ -43,9 +53,11 @@ const sendRawRequest = async (
     })
     socket.setEncoding('utf8')
     socket.on('data', (chunk) => {
-      response += chunk
+      response += chunk.toString('utf8')
     })
-    socket.on('end', () => resolve(response))
+    socket.on('end', () => {
+      resolve(response)
+    })
     socket.on('error', reject)
   })
 }
@@ -55,7 +67,10 @@ afterEach(async () => {
     servers.splice(0).map((server) => {
       if (!server.listening) return Promise.resolve()
       return new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()))
+        server.close((error) => {
+          if (error !== undefined) reject(error)
+          else resolve()
+        })
       })
     }),
   )
@@ -80,7 +95,7 @@ describe('createMetricsServer', () => {
   it('reports a startup error when its address is already in use', async () => {
     const first = createTestMetricsServer()
     await listen(first)
-    const address = first.address() as AddressInfo
+    const address = listenerAddress(first)
     const second = createTestMetricsServer()
     servers.push(second)
 
@@ -97,7 +112,7 @@ describe('createMetricsServer', () => {
     })
     vi.spyOn(metrics.registry, 'metrics').mockImplementation(() => {
       collectionStarted()
-      return new Promise<string>(() => {})
+      return new Promise<string>(() => undefined)
     })
     const server = createTestMetricsServer(metrics)
     const baseUrl = await listen(server)

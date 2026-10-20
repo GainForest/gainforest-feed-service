@@ -13,21 +13,53 @@ import {
   $output as skeletonOutput,
 } from '../src/lexicons/org/hypercerts/feed/getFeedSkeleton.js'
 
-const readLexicon = (relativePath: string): Record<string, any> =>
-  JSON.parse(
-    readFileSync(
-      new URL(`../lexicons/${relativePath}`, import.meta.url),
-      'utf8',
-    ),
-  ) as Record<string, any>
+type JsonObject = Record<string, unknown>
+
+const isJsonObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isJsonArray = (value: unknown): value is readonly unknown[] =>
+  Array.isArray(value)
+
+const asJsonObject = (value: unknown): JsonObject => {
+  if (!isJsonObject(value)) throw new Error('Expected a Lexicon JSON object')
+  return value
+}
+
+const valueAt = (root: JsonObject, ...path: string[]): unknown => {
+  let value: unknown = root
+  for (const key of path) {
+    value = asJsonObject(value)[key]
+  }
+  return value
+}
+
+const objectAt = (root: JsonObject, ...path: string[]): JsonObject =>
+  asJsonObject(valueAt(root, ...path))
+
+const arrayAt = (root: JsonObject, ...path: string[]): readonly unknown[] => {
+  const value = valueAt(root, ...path)
+  if (!isJsonArray(value)) throw new Error('Expected a Lexicon JSON array')
+  return value
+}
+
+const readLexicon = (relativePath: string): JsonObject => {
+  const source = readFileSync(
+    new URL(`../lexicons/${relativePath}`, import.meta.url),
+    'utf8',
+  )
+  const value: unknown = JSON.parse(source)
+  if (!isJsonObject(value)) throw new Error('Expected a Lexicon document')
+  return value
+}
 
 const skeletonLexicon = readLexicon('org/hypercerts/feed/getFeedSkeleton.json')
 const hydratedLexicon = readLexicon('org/hypercerts/feed/getFeed.json')
 const defsLexicon = readLexicon('org/hypercerts/feed/defs.json')
 
-const skeletonMain = skeletonLexicon.defs.main
-const hydratedMain = hydratedLexicon.defs.main
-const defs = defsLexicon.defs
+const skeletonMain = objectAt(skeletonLexicon, 'defs', 'main')
+const hydratedMain = objectAt(hydratedLexicon, 'defs', 'main')
+const defs = objectAt(defsLexicon, 'defs')
 
 const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const actorDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
@@ -59,19 +91,15 @@ const uriImage = {
   $type: 'org.hypercerts.defs#uri',
   uri: 'https://example.com/image.png',
 }
-const blob = jsonToLex(
-  {
-    $type: 'blob',
-    ref: { $link: blobCid },
-    mimeType: 'image/png',
-    size: 128,
-  },
-  { strict: true },
-)
-const blobWith = (
-  overrides: Record<string, unknown>,
-): Record<string, unknown> => ({
-  ...(blob as Record<string, unknown>),
+const blobJson = {
+  $type: 'blob',
+  ref: { $link: blobCid },
+  mimeType: 'image/png',
+  size: 128,
+}
+const blob = jsonToLex(blobJson, { strict: true })
+const blobWith = (overrides: JsonObject): JsonObject => ({
+  ...blobJson,
   ...overrides,
 })
 const smallImage = {
@@ -142,7 +170,7 @@ const viewsByKind = {
 
 const feedItem = (
   kind: keyof typeof viewsByKind = 'cert.create',
-): Record<string, any> => ({
+): JsonObject => ({
   subject: uri,
   view: {
     $type: 'org.hypercerts.feed.defs#hypercertsFeedView',
@@ -152,57 +180,80 @@ const feedItem = (
   },
 })
 
-const withFeedView = (
-  item: Record<string, any>,
-  overrides: Record<string, unknown>,
-): Record<string, any> => ({
+const withFeedView = (item: JsonObject, overrides: JsonObject): JsonObject => ({
   ...item,
-  view: { ...item.view, ...overrides },
+  view: { ...objectAt(item, 'view'), ...overrides },
 })
 
-const withContent = (
-  item: Record<string, any>,
-  content: Record<string, unknown>,
-): Record<string, any> => withFeedView(item, { content })
+const withContent = (item: JsonObject, content: JsonObject): JsonObject =>
+  withFeedView(item, { content })
 
 describe('feed Lexicon contract', () => {
   it('keeps registered feed inputs and UpperCamelCase public errors identical', () => {
-    expect(hydratedMain.input).toEqual(skeletonMain.input)
-    expect(hydratedMain.input.schema.required).toEqual(['feedId'])
-    expect(hydratedMain.input.schema.properties.feedId).toMatchObject({
+    expect(valueAt(hydratedMain, 'input')).toEqual(
+      valueAt(skeletonMain, 'input'),
+    )
+    expect(valueAt(hydratedMain, 'input', 'schema', 'required')).toEqual([
+      'feedId',
+    ])
+    expect(
+      valueAt(hydratedMain, 'input', 'schema', 'properties', 'feedId'),
+    ).toMatchObject({
       type: 'string',
       knownValues: [feedId],
     })
     expect(
-      defs.hypercertsFeedParams.properties.kinds.items.knownValues,
+      valueAt(
+        defs,
+        'hypercertsFeedParams',
+        'properties',
+        'kinds',
+        'items',
+        'knownValues',
+      ),
     ).toEqual(supportedFeedKinds)
-    expect(defs.hypercertsFeedView.properties.kind.knownValues).toEqual(
-      supportedFeedKinds,
-    )
-    expect(hydratedMain.input.schema.properties.params).toMatchObject({
+    expect(
+      valueAt(defs, 'hypercertsFeedView', 'properties', 'kind', 'knownValues'),
+    ).toEqual(supportedFeedKinds)
+    expect(
+      valueAt(hydratedMain, 'input', 'schema', 'properties', 'params'),
+    ).toMatchObject({
       type: 'union',
       closed: false,
       refs: [paramsType],
     })
-    expect(defs.hypercertsFeedParams.required ?? []).not.toContain('viewerDid')
-    expect(hydratedMain.input.schema.properties.limit).toMatchObject({
+    expect(
+      valueAt(defs, 'hypercertsFeedParams', 'required') ?? [],
+    ).not.toContain('viewerDid')
+    expect(
+      valueAt(hydratedMain, 'input', 'schema', 'properties', 'limit'),
+    ).toMatchObject({
       type: 'integer',
       minimum: 1,
       maximum: 100,
     })
-    expect(hydratedMain.input.schema.properties.cursor).toMatchObject({
+    expect(
+      valueAt(hydratedMain, 'input', 'schema', 'properties', 'cursor'),
+    ).toMatchObject({
       type: 'string',
       maxLength: 4096,
     })
-    expect(defs.hypercertsFeedParams.properties).not.toHaveProperty('authors')
-    expect(defs.hypercertsFeedParams.properties).not.toHaveProperty('limit')
-    expect(defs.hypercertsFeedParams.properties).not.toHaveProperty('cursor')
-    expect(defs.hypercertsFeedParams.properties.organizationQuality.ref).toBe(
+    const paramsProperties = objectAt(
+      defs,
+      'hypercertsFeedParams',
+      'properties',
+    )
+    expect(paramsProperties).not.toHaveProperty('authors')
+    expect(paramsProperties).not.toHaveProperty('limit')
+    expect(paramsProperties).not.toHaveProperty('cursor')
+    expect(valueAt(paramsProperties, 'organizationQuality', 'ref')).toBe(
       'org.hypercerts.feed.defs#organizationQualityPolicy',
     )
-    expect(hydratedMain.errors).toEqual(skeletonMain.errors)
-    const errorNames = hydratedMain.errors.map(
-      (error: { name: string }) => error.name,
+    expect(valueAt(hydratedMain, 'errors')).toEqual(
+      valueAt(skeletonMain, 'errors'),
+    )
+    const errorNames = arrayAt(hydratedMain, 'errors').map((error) =>
+      valueAt(asJsonObject(error), 'name'),
     )
     expect(errorNames).toEqual([
       'InvalidRequest',
@@ -234,13 +285,21 @@ describe('feed Lexicon contract', () => {
   })
 
   it('defines the generic URI-only skeleton wire shape', () => {
-    expect(skeletonMain.output.schema.required).toEqual(['feed'])
-    expect(skeletonMain.output.schema.properties.cursor).toMatchObject({
+    expect(valueAt(skeletonMain, 'output', 'schema', 'required')).toEqual([
+      'feed',
+    ])
+    expect(
+      valueAt(skeletonMain, 'output', 'schema', 'properties', 'cursor'),
+    ).toMatchObject({
       type: 'string',
       maxLength: 4096,
     })
-    expect(skeletonLexicon.defs.feedSkeletonItem.required).toEqual(['subject'])
-    expect(skeletonLexicon.defs.feedSkeletonItem.properties).toEqual({
+    expect(
+      valueAt(skeletonLexicon, 'defs', 'feedSkeletonItem', 'required'),
+    ).toEqual(['subject'])
+    expect(
+      valueAt(skeletonLexicon, 'defs', 'feedSkeletonItem', 'properties'),
+    ).toEqual({
       subject: {
         type: 'string',
         format: 'at-uri',
@@ -282,27 +341,40 @@ describe('feed Lexicon contract', () => {
   })
 
   it('defines a generic hydrated item with a required open feed view', () => {
-    expect(hydratedMain.output.schema.required).toEqual(['feed'])
-    expect(hydratedMain.output.schema.properties.feed.items).toEqual({
+    expect(valueAt(hydratedMain, 'output', 'schema', 'required')).toEqual([
+      'feed',
+    ])
+    expect(
+      valueAt(hydratedMain, 'output', 'schema', 'properties', 'feed', 'items'),
+    ).toEqual({
       type: 'ref',
       ref: '#feedItem',
     })
-    expect(hydratedLexicon.defs.feedItem.required).toEqual(['subject', 'view'])
-    expect(hydratedLexicon.defs.feedItem.properties.subject).toMatchObject({
+    expect(valueAt(hydratedLexicon, 'defs', 'feedItem', 'required')).toEqual([
+      'subject',
+      'view',
+    ])
+    expect(
+      valueAt(hydratedLexicon, 'defs', 'feedItem', 'properties', 'subject'),
+    ).toMatchObject({
       type: 'string',
       format: 'at-uri',
     })
-    expect(hydratedLexicon.defs.feedItem.properties.view).toMatchObject({
+    expect(
+      valueAt(hydratedLexicon, 'defs', 'feedItem', 'properties', 'view'),
+    ).toMatchObject({
       type: 'union',
       closed: false,
       refs: ['org.hypercerts.feed.defs#hypercertsFeedView'],
     })
-    expect(defs.hypercertsFeedView.required).toEqual([
+    expect(valueAt(defs, 'hypercertsFeedView', 'required')).toEqual([
       'kind',
       'actor',
       'content',
     ])
-    expect(defs.hypercertsFeedView.properties.content).toMatchObject({
+    expect(
+      valueAt(defs, 'hypercertsFeedView', 'properties', 'content'),
+    ).toMatchObject({
       type: 'union',
       closed: false,
       refs: [
@@ -317,8 +389,8 @@ describe('feed Lexicon contract', () => {
     expect(defs).not.toHaveProperty('feedItem')
 
     const serialized = JSON.stringify({
-      feedItem: hydratedLexicon.defs.feedItem,
-      hypercertsFeedView: defs.hypercertsFeedView,
+      feedItem: valueAt(hydratedLexicon, 'defs', 'feedItem'),
+      hypercertsFeedView: valueAt(defs, 'hypercertsFeedView'),
     })
     for (const forbidden of [
       'record',
@@ -334,13 +406,15 @@ describe('feed Lexicon contract', () => {
   })
 
   it('keeps activity and collection counts optional on the wire', () => {
-    expect(defs.activityView.required).toEqual(['title'])
-    expect(defs.collectionView.required).toEqual(['title'])
-    expect(defs.activityView.properties.locationCount).toEqual({
+    expect(valueAt(defs, 'activityView', 'required')).toEqual(['title'])
+    expect(valueAt(defs, 'collectionView', 'required')).toEqual(['title'])
+    expect(
+      valueAt(defs, 'activityView', 'properties', 'locationCount'),
+    ).toEqual({
       type: 'integer',
       minimum: 0,
     })
-    expect(defs.collectionView.properties.itemCount).toEqual({
+    expect(valueAt(defs, 'collectionView', 'properties', 'itemCount')).toEqual({
       type: 'integer',
       minimum: 0,
     })
@@ -367,19 +441,17 @@ describe('feed Lexicon contract', () => {
   it('uses protocol-native Hypercerts variants through open image unions', () => {
     expect(defs).not.toHaveProperty('uriImage')
     expect(defs).not.toHaveProperty('blobImage')
-    expect(Object.keys(defs.actorSummary.properties).sort()).toEqual([
-      'avatar',
-      'did',
-      'displayName',
-    ])
-    expect(defs.actorSummary.properties.avatar).toEqual({
+    expect(
+      Object.keys(objectAt(defs, 'actorSummary', 'properties')).sort(),
+    ).toEqual(['avatar', 'did', 'displayName'])
+    expect(valueAt(defs, 'actorSummary', 'properties', 'avatar')).toEqual({
       type: 'union',
       refs: ['org.hypercerts.defs#uri', 'org.hypercerts.defs#smallImage'],
     })
-    expect(defs.activityView.properties.image).toEqual(
-      defs.actorSummary.properties.avatar,
+    expect(valueAt(defs, 'activityView', 'properties', 'image')).toEqual(
+      valueAt(defs, 'actorSummary', 'properties', 'avatar'),
     )
-    expect(defs.collectionView.properties.image).toEqual({
+    expect(valueAt(defs, 'collectionView', 'properties', 'image')).toEqual({
       type: 'union',
       refs: [
         'org.hypercerts.defs#uri',
@@ -387,7 +459,7 @@ describe('feed Lexicon contract', () => {
         'org.hypercerts.defs#largeImage',
       ],
     })
-    expect(defs.updateView.properties.image).toEqual({
+    expect(valueAt(defs, 'updateView', 'properties', 'image')).toEqual({
       type: 'union',
       refs: ['org.hypercerts.defs#uri', 'org.hypercerts.defs#smallBlob'],
     })
@@ -395,7 +467,7 @@ describe('feed Lexicon contract', () => {
 
   it('uses strong-reference targets only on evaluation, measurement, and update views', () => {
     for (const name of ['evaluationView', 'measurementView', 'updateView']) {
-      expect(defs[name].properties.target).toEqual({
+      expect(valueAt(defs, name, 'properties', 'target')).toEqual({
         type: 'ref',
         ref: 'com.atproto.repo.strongRef',
       })
@@ -403,9 +475,7 @@ describe('feed Lexicon contract', () => {
   })
 
   it('accepts both image variants and all six views across seven kinds', () => {
-    const items = Object.keys(viewsByKind).map((kind) =>
-      feedItem(kind as keyof typeof viewsByKind),
-    )
+    const items = supportedFeedKinds.map((kind) => feedItem(kind))
 
     expect(() =>
       hydratedOutput.schema.$parse({ feed: items, cursor: 'opaque-cursor' }),

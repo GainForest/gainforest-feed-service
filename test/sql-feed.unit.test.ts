@@ -7,16 +7,14 @@ import {
   type CursorCodec,
 } from '../src/feed/cursor.js'
 import { FeedError, FeedErrorCode } from '../src/feed/errors.js'
-import type {
-  InternalFeedRow,
-  InternalSourceFeedRow,
-} from '../src/feed/registry.js'
+import type { InternalFeedRow } from '../src/feed/registry.js'
 import {
   defineSqlFeed,
   type FeedRowMapper,
   type SqlFeedQueryExecutor,
 } from '../src/feed/sql-feed.js'
 import { Metrics } from '../src/metrics.js'
+import type { FeedParams } from '../src/feed/types.js'
 
 const feedId = 'org.hypercerts.feed.defs#scoredFeed'
 const paramsType = 'org.hypercerts.feed.defs#scoredFeedParams'
@@ -57,23 +55,26 @@ interface ScoredFeedRow extends InternalFeedRow {
 }
 
 class FakeQueryExecutor implements SqlFeedQueryExecutor {
-  readonly calls: Array<{
+  readonly calls: {
     readonly text: string
     readonly values: readonly unknown[]
-  }> = []
+  }[] = []
 
   constructor(
     readonly rows: readonly ScoredDatabaseRow[],
     private readonly failure?: Error,
   ) {}
 
-  async query<Row extends QueryResultRow>(
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- Required by SqlFeedQueryExecutor's generic query contract.
+  query<Row extends QueryResultRow>(
     text: string,
     values: readonly unknown[] = [],
   ): Promise<{ readonly rows: readonly Row[] }> {
     this.calls.push({ text, values })
-    if (this.failure) throw this.failure
-    return { rows: this.rows as unknown as readonly Row[] }
+    if (this.failure !== undefined) return Promise.reject(this.failure)
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Fixtures model the concrete row specialization requested by defineSqlFeed.
+    const rows = this.rows as unknown as readonly Row[]
+    return Promise.resolve({ rows })
   }
 }
 
@@ -129,13 +130,23 @@ const databaseRow = (suffix: string, score: number): ScoredDatabaseRow => {
     collection: 'org.hypercerts.claim.activity',
     actor_did: actorDid,
     kind: 'cert.create',
-    sort_value: `2026-07-21T10:00:0${score}.000000Z`,
+    sort_value: `2026-07-21T10:00:0${String(score)}.000000Z`,
     score,
     selected_source_uri: uri,
     selected_source_cid: cid,
     selected_source_collection: 'org.hypercerts.claim.activity',
     source_json: { score },
   }
+}
+
+const parseScoredParams = (input: FeedParams): ScoredParams => {
+  if (input.$type !== paramsType) {
+    throw new FeedError(
+      FeedErrorCode.InvalidRequest,
+      'scored feed params type is invalid.',
+    )
+  }
+  return { $type: paramsType }
 }
 
 const createFeed = (
@@ -148,15 +159,7 @@ const createFeed = (
       id: feedId,
       params: {
         type: paramsType,
-        parse(input): ScoredParams {
-          if (input.$type !== paramsType) {
-            throw new FeedError(
-              FeedErrorCode.InvalidRequest,
-              'scored feed params type is invalid.',
-            )
-          }
-          return input as ScoredParams
-        },
+        parse: parseScoredParams,
         normalize(_params, pagination): NormalizedScoredParams {
           return {
             limit: pagination.limit ?? 2,
@@ -187,7 +190,7 @@ describe('defineSqlFeed', () => {
     const feed = createFeed(database)
 
     const page = await feed.loadPage(
-      { $type: paramsType } as ScoredParams,
+      { $type: paramsType },
       { limit: 2 },
       'metadata',
     )
@@ -213,7 +216,7 @@ describe('defineSqlFeed', () => {
     const feed = createFeed(new FakeQueryExecutor([source]))
 
     await expect(
-      feed.loadPage({ $type: paramsType } as ScoredParams, {}, 'with-source'),
+      feed.loadPage({ $type: paramsType }, {}, 'with-source'),
     ).resolves.toEqual({
       rows: [
         {
@@ -240,11 +243,7 @@ describe('defineSqlFeed', () => {
     )
 
     await expect(
-      feed.loadPage(
-        { $type: paramsType } as ScoredParams,
-        { limit: 1 },
-        'metadata',
-      ),
+      feed.loadPage({ $type: paramsType }, { limit: 1 }, 'metadata'),
     ).rejects.toThrow(/returned 3 rows after requesting at most 2/i)
   })
 
@@ -255,7 +254,7 @@ describe('defineSqlFeed', () => {
     )
 
     await expect(
-      feed.loadPage({ $type: paramsType } as ScoredParams, {}, 'with-source'),
+      feed.loadPage({ $type: paramsType }, {}, 'with-source'),
     ).rejects.toThrow(/without sourceValue in with-source mode/i)
   })
 
@@ -268,7 +267,7 @@ describe('defineSqlFeed', () => {
         id: feedId,
         params: {
           type: paramsType,
-          parse: (input) => input as ScoredParams,
+          parse: parseScoredParams,
           normalize: () => ({ limit: 2 }),
         },
         sql: 'SELECT scored feed',
@@ -279,7 +278,7 @@ describe('defineSqlFeed', () => {
     )
 
     await expect(
-      feed.loadPage({ $type: paramsType } as ScoredParams, {}, 'metadata'),
+      feed.loadPage({ $type: paramsType }, {}, 'metadata'),
     ).rejects.toBe(failure)
     expect(await metrics.registry.metrics()).toContain(
       'hypercerts_feed_database_duration_seconds_count{operation="feed"} 1',
@@ -301,11 +300,7 @@ describe('defineSqlFeed', () => {
     const cursor = encodeCursor(otherFeedId, cursorRow, scoredCursor)
 
     await expect(
-      feed.loadPage(
-        { $type: paramsType } as ScoredParams,
-        { cursor },
-        'metadata',
-      ),
+      feed.loadPage({ $type: paramsType }, { cursor }, 'metadata'),
     ).rejects.toMatchObject({ code: FeedErrorCode.InvalidCursor })
     expect(database.calls).toEqual([])
   })

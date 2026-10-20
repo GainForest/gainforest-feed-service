@@ -1,4 +1,4 @@
-import { jsonToLex } from '@atproto/lex'
+import { jsonToLex, type JsonObject } from '@atproto/lex'
 import type { QueryResultRow } from 'pg'
 import { describe, expect, it } from 'vitest'
 
@@ -30,13 +30,16 @@ class FakeQueryExecutor implements IdentityQueryExecutor {
     private readonly failure?: Error,
   ) {}
 
-  async query<T extends QueryResultRow>(
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- Required by IdentityQueryExecutor's generic query contract.
+  query<T extends QueryResultRow>(
     text: string,
     values: readonly unknown[] = [],
   ): Promise<{ readonly rows: readonly T[] }> {
     this.calls.push({ text, values })
-    if (this.failure) throw this.failure
-    return { rows: this.resultRows as unknown as readonly T[] }
+    if (this.failure !== undefined) return Promise.reject(this.failure)
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- Fixtures model the IdentityQueryRow specialization requested by PostgresIdentityReader.
+    const rows = this.resultRows as unknown as readonly T[]
+    return Promise.resolve({ rows })
   }
 }
 
@@ -47,9 +50,9 @@ const profile = (overrides: Record<string, unknown> = {}): unknown => ({
 })
 
 const blobImage = (
-  overrides: Record<string, unknown> = {},
+  overrides: JsonObject = {},
   variant: 'smallImage' | 'largeImage' = 'smallImage',
-): unknown => ({
+): JsonObject => ({
   $type: `org.hypercerts.defs#${variant}`,
   image: {
     $type: 'blob',
@@ -60,8 +63,8 @@ const blobImage = (
   },
 })
 
-const protocolValue = (value: unknown): unknown =>
-  jsonToLex(value as Parameters<typeof jsonToLex>[0], { strict: true })
+const protocolValue = (value: JsonObject): unknown =>
+  jsonToLex(value, { strict: true })
 
 const identityResultRow = (
   requestedDid: string,
