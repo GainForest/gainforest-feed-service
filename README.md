@@ -1,9 +1,8 @@
 # Hypercerts Feed Service
 
-A standalone, read-only TypeScript service. It reads the current PostgreSQL data owned by Hyperindex and serves ordered Hypercerts feeds over XRPC.
+A standalone, read-only TypeScript service. It reads current HappyView PostgreSQL data and serves ordered Hypercerts feeds over XRPC.
 
-
-Hyperindex is the only supported owner of the database. The service provides a URI-only skeleton and a hydrated feed with generic entries and feed-specific views. It does not ingest or change indexed data, import Hyperindex code, call the Hyperindex GraphQL API, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication; it never trusts a body viewer over the verified issuer.
+HappyView owns the PostgreSQL tables. The service provides a URI-only skeleton and a hydrated feed with generic entries and feed-specific views. It does not ingest or change indexed data, call HappyView APIs, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication; it never trusts a body viewer over the verified issuer.
 
 ## Endpoints
 
@@ -70,7 +69,6 @@ Each skeleton entry intentionally contains only the source record AT-URI. A down
         "kind": "evaluation.create",
         "actor": {
           "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
-          "handle": "evaluator.example",
           "displayName": "Evaluator"
         },
         "content": {
@@ -94,7 +92,7 @@ Every hydrated entry has a generic source `subject` and an open `view` union. Th
 
 Every hydrated feed entry comes from a valid source record. Each entry has a feed-specific view and kind-specific content.
 
-The service uses an actor's Certified profile for their name and avatar when it can. Otherwise, it uses their Bluesky profile. It adds a valid handle separately. If there is no profile, it shows the actor by their handle or DID.
+The service uses a meaningful, valid Certified profile for an actor's display name and avatar. If no such profile is available, the actor is represented by their DID. It does not expose stored handles or fall back to Bluesky profiles.
 
 An evaluation, measurement, or update may point to another record by its exact URI and CID. These targets remain strong references even though the entry's source `subject` is URI-only. The service checks that each target reference is valid.
 
@@ -108,7 +106,7 @@ The response never contains the original source JSON. It also does not say where
 
 The service does not fetch, preview, or expand linked records. It only checks that the link contains a valid URI and CID.
 
-The service does not contact a PDS or AppView. It does not download or proxy image files. It gets Bluesky profile data from the indexed database.
+The service does not contact a PDS, AppView, or HappyView API. It does not download or proxy image files.
 
 ## Request flow
 
@@ -121,7 +119,7 @@ sequenceDiagram
     participant Registry as Feed Registry
     participant Feed as Registered SQL Feed
     participant Identity as Identity Reader
-    participant DB as Hyperindex PostgreSQL
+    participant DB as HappyView PostgreSQL
 
     Client->>HTTP: POST feed procedure + optional Bearer JWT
     HTTP->>XRPC: Bounded, validated JSON
@@ -130,15 +128,15 @@ sequenceDiagram
     XRPC->>Service: Endpoint input + trusted viewer DID
     Service->>Registry: Load metadata or source-aware page
     Registry->>Feed: Dispatch feedId, optional params, and pagination
-    Feed->>DB: One normalized Hyperindex selection statement
+    Feed->>DB: One normalized HappyView selection statement
     DB-->>Feed: Scope and limit+1 metadata or exact sources
     Feed-->>Registry: Selected page and feed-scoped cursor
     Registry-->>Service: Selected page and cursor
     alt Hydrated endpoint
         Service->>Service: Validate sources and omit invalid rows
         Service->>Identity: Requested actor DIDs when needed
-        Identity->>DB: One actor/profile batch
-        DB-->>Identity: Current identity contexts
+        Identity->>DB: One Certified-profile batch
+        DB-->>Identity: Current profile contexts
         Identity-->>Service: Complete DID map
         Service-->>XRPC: Generic entries, feed-specific views, and selected-page cursor
     else Skeleton endpoint
@@ -159,9 +157,9 @@ sequenceDiagram
 - The base scope always comes from the viewer's current `app.certified.graph.follow` records. The service ignores malformed follow subjects.
 - `trustedEvaluators` adds the subjects of every current, active endorsement award from each evaluator.
 - An endorsement definition with no `allowedIssuers` allows any issuer. When it is present, only its listed issuer DIDs qualify. An empty or malformed value allows no issuers.
-- The service removes the viewer. Hyperindex removes source records for identities that are explicitly deleted, deactivated, suspended, or taken down, so feed selection does not check actor status.
+- The service removes the viewer. It does not query actor status; only the current follow, award, and feed records present in HappyView affect selection.
 - The organization-quality rules run against the final combined author list before event selection. Only exact `app.certified.actor.organization/self` records count as organizations.
-- Trusted quality labelers come only from the service configuration. Quality labels are bare-DID, non-CID `external_label` rows. Callers cannot choose label sources.
+- Trusted quality labelers come only from the service configuration. Quality labels are current positive `happyview_labels` rows matched to a bare organization DID. `cts` and `exp` are stored as TEXT and must be complete, finite RFC3339 or legacy PostgreSQL timestamp values; `cts` is validated but not used for ordering, and `exp` is validated before casting. Malformed, date-only, nonfinite, or elapsed values are inactive. HappyView removes a matching row when it receives a negation, and the table has no label CID or history. A row proves only that HappyView currently projects that label, not that every label was ingested. Callers cannot choose label sources.
 - Leaving out `kinds`, or passing an empty list, includes every supported kind. Unknown kinds are rejected as `InvalidRequest`.
 
 Supported event kinds:
@@ -172,7 +170,6 @@ collection.create
 project.created_with_cert
 evaluation.create
 measurement.create
-hyperboard.create
 update.create
 endorsement.award
 ```
@@ -187,7 +184,7 @@ The order is:
 feed timestamp DESC, record URI DESC
 ```
 
-Entries appear newest first using an internal feed timestamp. It uses the record's valid `createdAt`; otherwise, it uses the time when Hyperindex indexed the record. The timestamp is not exposed in either response. Pagination moves forward from the last source row chosen before hydration, so removing an invalid hydrated entry does not move the cursor.
+Entries appear newest first using an internal feed timestamp. HappyView stores record JSON and `indexed_at` as TEXT; the query validates JSON and timestamp text before casting, falls back from an invalid or absent `createdAt` to a finite, complete `indexed_at` in RFC3339 or legacy PostgreSQL format, and compares timestamps chronologically rather than lexically. Date-only and nonfinite fallback values are rejected. HappyView's `created_at` is row-ingestion time and is not used for feed ordering. Invalid source JSON does not abort selection; hydration drops an invalid selected source without backfilling. The effective timestamp is not exposed in either response. Pagination moves forward from the last source row chosen before hydration, so removing an invalid hydrated entry does not move the cursor.
 
 ### Pagination and database reads
 
@@ -222,7 +219,7 @@ For local development, copy `.env.example` to `.env`. For deployment, copy its v
 
 | Variable | Required | Default | Purpose |
 |---|---:|---:|---|
-| `DATABASE_URL` | yes | | Dedicated read-only Postgres URL for the Hyperindex database |
+| `DATABASE_URL` | yes | | Dedicated read-only Postgres URL for the HappyView database |
 | `SERVICE_DID` | yes | | DID identifying this service and required as the service-auth JWT audience |
 | `SERVICE_AUTH_MAX_AGE_SECONDS` | no | `300` | Maximum service-auth JWT age; bounded from 1 through 3600 seconds |
 | `DID_RESOLUTION_TIMEOUT_MS` | no | `2000` | Total timeout for one HTTPS DID-document resolution; bounded from 100 through 60000 ms |
@@ -237,7 +234,7 @@ For local development, copy `.env.example` to `.env`. For deployment, copy its v
 | `DATABASE_STATEMENT_TIMEOUT_MS` | no | `5000` | PostgreSQL statement timeout |
 | `REQUEST_TIMEOUT_MS` | no | `10000` | Maximum time allowed to receive an HTTP request; not a handler or database deadline |
 | `GRACEFUL_SHUTDOWN_MS` | no | `10000` | Shutdown drain timeout |
-| `TRUSTED_QUALITY_LABELER_DIDS` | no | empty | Comma-separated Orglabeler trust roots |
+| `TRUSTED_QUALITY_LABELER_DIDS` | no | empty | Comma-separated labeler DIDs trusted for current HappyView quality-label rows |
 
 For example, set `SERVICE_DID=did:web:dev.feed.hypercerts.dev` only when `https://dev.feed.hypercerts.dev` routes to this service; clients can discover its XRPC endpoint using `did:web:dev.feed.hypercerts.dev#hypercerts_feed`. This service does not publish a signing key: it verifies callers using their own DID documents. The DID service entry is for discovery and does not change JWT audience validation.
 
@@ -249,24 +246,22 @@ If there are no configured trusted labelers, known organizations count as unrate
 
 Use a dedicated login that has only `SELECT` access. The service also sets `default_transaction_read_only=on` for every connection in the pool, but database grants are still the main security boundary.
 
-This database arrangement will change when the Hypercerts API is introduced. At that point, Hypercerts Feed Service will use the same database as the Hypercerts API.
-
 Each service replica has its own limited in-process pool. When planning database connections, allow for `replica count × DATABASE_MAX_CONNECTIONS`. Use an external pooler if many replicas share a PostgreSQL server with few available connections.
 
 Example operator setup:
 
 ```sql
 CREATE ROLE hypercerts_feed_reader LOGIN PASSWORD '<managed-secret>';
-GRANT CONNECT ON DATABASE hyperindex TO hypercerts_feed_reader;
+GRANT CONNECT ON DATABASE happyview TO hypercerts_feed_reader;
 GRANT USAGE ON SCHEMA public TO hypercerts_feed_reader;
-GRANT SELECT ON TABLE public.record, public.actor, public.external_label
+GRANT SELECT ON TABLE public.happyview_records, public.happyview_labels
   TO hypercerts_feed_reader;
 ALTER ROLE hypercerts_feed_reader SET default_transaction_read_only = on;
 ```
 
-The service has no migrations or feed tables of its own. `/ready` checks that the database can be reached, PostgreSQL 16 can validate timestamps, and the session is read-only. It does not check Hyperindex tables, migrations, label subscriptions, completed backfills, or ingestion freshness. See [`docs/database-contract.md`](docs/database-contract.md) for the runtime schema contract.
+The service has no migrations or feed tables of its own. `/ready` checks that the database can be reached, PostgreSQL 16 can safely validate JSON and timestamp text, and the session is read-only. It does not check HappyView tables, labeler subscription health, label completeness, or ingestion freshness. See [`docs/database-contract.md`](docs/database-contract.md) for the runtime schema contract.
 
-Before cutover, confirm that trusted quality-label subscriptions are healthy and current, the migration-010 timestamp backfill is complete, and the Hyperindex filters and backfill include `app.certified.actor.profile`, `app.bsky.actor.profile`, and `org.hyperboards.board`.
+Before cutover, grant the service read-only access to `happyview_records` and `happyview_labels`, confirm that trusted labeler subscriptions are configured, and verify the record collections needed by this service are being stored. A present label row proves only that HappyView currently projects that label; it does not prove that every label was ingested.
 
 ## Development
 
@@ -280,7 +275,7 @@ npm run test:unit
 npm run build
 ```
 
-The committed Lexicon JSON in `lexicons/` defines the public wire contract and includes installed external dependencies. `lexicons.json` pins installed network Lexicons by AT-URI and CID. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it. Codegen stages only the standard `org.hypercerts.defs#uri`, `#smallBlob`, `#smallImage`, and `#largeImage` fragments from the pinned `@hypercerts-org/lexicon` package. This keeps the feed from committing duplicate definitions. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
+The committed project Lexicons in `lexicons/` define the public wire contract. `lexicons.json` pins active external Lexicon dependencies by AT-URI and CID; it currently includes `com.atproto.repo.strongRef`. The previously installed `app.bsky.actor.profile.json` file is intentionally preserved but is no longer an active dependency or used for identity hydration. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it. Codegen stages only the standard `org.hypercerts.defs#uri`, `#smallBlob`, `#smallImage`, and `#largeImage` fragments from the pinned `@hypercerts-org/lexicon` package. This keeps the feed from committing duplicate definitions. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
 
 Check the committed network Lexicons against the manifest with:
 
@@ -303,14 +298,14 @@ TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/hypercerts_feed
 
 The test suite creates the smallest needed contract tables and test rows. It does not drop or empty existing tables. Never point it at a shared, staging, or production database.
 
-To test against Hyperindex's migrated schema, first have Hyperindex migrate a separate disposable database that otherwise contains no application rows:
+To test against HappyView's migrated schema, use a separate disposable database with no application rows:
 
 ```bash
-TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/hyperindex_feed_test' \
-  npm run test:integration:hyperindex
+TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/happyview_feed_test' \
+  npm run test:integration:happyview
 ```
 
-This command needs `psql`. It checks the required Hyperindex migrations, the record, actor, and external-label columns, the generated `record.rkey`, and the external-label lookup index. It then runs the same behavior tests. It does not apply Hyperindex migrations.
+This command needs `psql`. It checks the HappyView columns used by the service, then runs the behavior suite, which inserts synthetic feed records and label rows. It does not apply HappyView migrations or prove that real records or labels have been ingested. Do not point it at a shared, staging, or production database. The suite has no supported label-import path; HappyView's label stream uses standard web PKI roots, so a self-signed local mock labeler cannot populate labels through the real subscription.
 
 ## Releases
 
@@ -329,7 +324,7 @@ docker run --rm -p 3000:3000 \
   hypercerts-feed-service
 ```
 
-Deploy the service beside Hyperindex and use private networking for the database.
+Deploy the service beside HappyView and use private networking for the database.
 
 To expose metrics, set a private metrics listener separate from the public application port:
 
@@ -367,4 +362,4 @@ Public errors never show SQL, database credentials, table contents, internal cau
 
 ## MVP boundaries
 
-The service does not ingest data, write records, manage migrations, cache feed results across requests, call Hyperindex/PDS/AppView APIs, download blobs, hydrate target records, build target previews, recursively hydrate linked records, save preferences, or provide an unchangeable event history. It retains only bounded, process-local replay-protection state through the JWT `jti`; that state is not a feed-result cache. Results show Hyperindex's current, changeable data and its current freshness.
+The service does not ingest data, write records, manage migrations, cache feed results across requests, call HappyView/PDS/AppView APIs, download blobs, hydrate target records, build target previews, recursively hydrate linked records, save preferences, or provide an unchangeable event history. It retains only bounded, process-local replay-protection state through the JWT `jti`; that state is not a feed-result cache. Results show HappyView's current, changeable data and its current freshness.

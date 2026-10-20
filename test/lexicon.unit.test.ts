@@ -37,6 +37,15 @@ const blobCid = 'bafkreiehxpuhtr5f6v4eu4byjo2j7kkrhjvd7psmfu4imnpdzb3bdqb7vy'
 const createdAt = '2026-07-21T10:00:00.000Z'
 const feedId = 'org.hypercerts.feed.defs#hypercertsFeed'
 const paramsType = 'org.hypercerts.feed.defs#hypercertsFeedParams'
+const supportedFeedKinds = [
+  'cert.create',
+  'collection.create',
+  'project.created_with_cert',
+  'evaluation.create',
+  'measurement.create',
+  'update.create',
+  'endorsement.award',
+] as const
 
 const feedRequest = {
   feedId,
@@ -78,7 +87,6 @@ const smallBlob = {
 }
 const actor = {
   did: actorDid,
-  handle: 'actor.example',
   displayName: 'Actor',
   avatar: smallImage,
 }
@@ -122,10 +130,6 @@ const viewsByKind = {
     createdAt,
     target,
   },
-  'hyperboard.create': {
-    $type: 'org.hypercerts.feed.defs#hyperboardView',
-    createdAt,
-  },
   'update.create': {
     $type: 'org.hypercerts.feed.defs#updateView',
     title: 'Field report',
@@ -168,6 +172,12 @@ describe('feed Lexicon contract', () => {
       type: 'string',
       knownValues: [feedId],
     })
+    expect(
+      defs.hypercertsFeedParams.properties.kinds.items.knownValues,
+    ).toEqual(supportedFeedKinds)
+    expect(defs.hypercertsFeedView.properties.kind.knownValues).toEqual(
+      supportedFeedKinds,
+    )
     expect(hydratedMain.input.schema.properties.params).toMatchObject({
       type: 'union',
       closed: false,
@@ -302,7 +312,6 @@ describe('feed Lexicon contract', () => {
         '#endorsementView',
         '#evaluationView',
         '#measurementView',
-        '#hyperboardView',
         '#updateView',
       ],
     })
@@ -359,6 +368,11 @@ describe('feed Lexicon contract', () => {
   it('uses protocol-native Hypercerts variants through open image unions', () => {
     expect(defs).not.toHaveProperty('uriImage')
     expect(defs).not.toHaveProperty('blobImage')
+    expect(Object.keys(defs.actorSummary.properties).sort()).toEqual([
+      'avatar',
+      'did',
+      'displayName',
+    ])
     expect(defs.actorSummary.properties.avatar).toEqual({
       type: 'union',
       refs: [
@@ -393,10 +407,9 @@ describe('feed Lexicon contract', () => {
         ref: 'com.atproto.repo.strongRef',
       })
     }
-    expect(defs.hyperboardView.properties).not.toHaveProperty('target')
   })
 
-  it('accepts both image variants and all seven views across eight kinds', () => {
+  it('accepts both image variants and all six views across seven kinds', () => {
     const items = Object.keys(viewsByKind).map((kind) =>
       feedItem(kind as keyof typeof viewsByKind),
     )

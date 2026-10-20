@@ -6,11 +6,9 @@ import {
   type BlobRef,
 } from '@atproto/lex'
 import { jsonToLex as jsonToLegacyLex } from '@atproto/lexicon'
-import { isValidHandle } from '@atproto/syntax'
 import {
   AppCertifiedActorProfile,
   AppCertifiedBadgeAward,
-  OrgHyperboardsBoard,
   OrgHypercertsClaimActivity,
   OrgHypercertsCollection,
   OrgHypercertsContextAttachment,
@@ -19,8 +17,6 @@ import {
 } from '@hypercerts-org/lexicon'
 
 import type { FeedKind } from '../feed/types.js'
-import * as AppBskyActorProfile from '../lexicons/app/bsky/actor/profile.js'
-import type { ActorRow, SanitizedActorRow } from './types.js'
 
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
@@ -28,17 +24,12 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/webp',
 ])
-const ALLOWED_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/webm'])
 const SMALL_IMAGE_MAX_BYTES = 5_242_880
 const LARGE_IMAGE_MAX_BYTES = 10_485_760
 const SMALL_BLOB_MAX_BYTES = 10_485_760
-const SMALL_VIDEO_MAX_BYTES = 20_971_520
 
 /** Certified profile shape accepted by the authoritative v1.0.0 validator. */
 export type ValidatedCertifiedProfile = AppCertifiedActorProfile.Record
-
-/** Bluesky profile shape accepted by the installed published Lexicon. */
-export type ValidatedBlueskyProfile = AppBskyActorProfile.Main
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null
@@ -87,40 +78,6 @@ const hasValidKnownSmallBlob = (value: unknown): boolean => {
   return hasValidBlobRef(value.blob, SMALL_BLOB_MAX_BYTES)
 }
 
-const hasValidKnownSmallVideo = (value: unknown): boolean => {
-  if (!isObject(value) || value.$type !== 'org.hypercerts.defs#smallVideo') {
-    return true
-  }
-  return hasValidBlobRef(
-    value.video,
-    SMALL_VIDEO_MAX_BYTES,
-    ALLOWED_VIDEO_MIME_TYPES,
-  )
-}
-
-const hasValidKnownHyperboardBlobs = (
-  board: OrgHyperboardsBoard.Record,
-): boolean =>
-  hasValidKnownBlob(
-    board.config?.backgroundImage,
-    'org.hypercerts.defs#smallImage',
-    SMALL_IMAGE_MAX_BYTES,
-  ) &&
-  (board.contributorConfigs?.every(
-    (contributor) =>
-      hasValidKnownBlob(
-        contributor.image,
-        'org.hypercerts.defs#smallImage',
-        SMALL_IMAGE_MAX_BYTES,
-      ) &&
-      hasValidKnownBlob(
-        contributor.hoverImage,
-        'org.hypercerts.defs#smallImage',
-        SMALL_IMAGE_MAX_BYTES,
-      ) &&
-      hasValidKnownSmallVideo(contributor.video),
-  ) ?? true)
-
 const hasValidKnownProfileBlobs = (
   profile: ValidatedCertifiedProfile,
 ): boolean =>
@@ -155,23 +112,6 @@ export const validateCertifiedProfile = (
   }
 }
 
-/** Validates an indexed Bluesky profile before any field reaches a public summary. */
-export const validateBlueskyProfile = (
-  value: unknown,
-): ValidatedBlueskyProfile | undefined => {
-  try {
-    const indexedJson = value as Parameters<typeof jsonToProtocolLex>[0]
-    const result = AppBskyActorProfile.$safeParse(
-      jsonToProtocolLex(indexedJson, { strict: true }),
-    )
-    return result.success
-      ? (result.value as unknown as ValidatedBlueskyProfile)
-      : undefined
-  } catch {
-    return undefined
-  }
-}
-
 /** Whether a validated Certified profile contains any user-authored profile content. */
 export const isMeaningfulCertifiedProfile = (
   profile: ValidatedCertifiedProfile,
@@ -184,21 +124,6 @@ export const isMeaningfulCertifiedProfile = (
       profile.pronouns ||
       profile.website,
   )
-
-/** Validates the optional handle from one Hyperindex actor row. */
-export const sanitizeActorRow = (
-  did: string,
-  row: ActorRow | undefined,
-): SanitizedActorRow => {
-  if (!row) return { did }
-
-  const handle =
-    row.handle !== null && isValidHandle(row.handle) ? row.handle : undefined
-  return {
-    did,
-    ...(handle === undefined ? {} : { handle }),
-  }
-}
 
 export type ValidatedFeedRecord =
   | {
@@ -224,12 +149,6 @@ export type ValidatedFeedRecord =
       readonly collection: 'org.hypercerts.context.measurement'
       readonly rawValue: unknown
       readonly value: OrgHypercertsContextMeasurement.Record
-    }
-  | {
-      readonly kind: 'hyperboard.create'
-      readonly collection: 'org.hyperboards.board'
-      readonly rawValue: unknown
-      readonly value: OrgHyperboardsBoard.Record
     }
   | {
       readonly kind: 'update.create'
@@ -361,25 +280,6 @@ const validateMeasurementRecord = (
   }
 }
 
-const validateHyperboardRecord = (
-  kind: FeedKind,
-  rawValue: unknown,
-  parsedValue: unknown,
-): ValidatedFeedRecordFor<'org.hyperboards.board'> | undefined => {
-  if (kind !== 'hyperboard.create') return undefined
-
-  const result = OrgHyperboardsBoard.validateRecord(parsedValue)
-  if (!result.success || !hasValidKnownHyperboardBlobs(result.value)) {
-    return undefined
-  }
-  return {
-    kind,
-    collection: 'org.hyperboards.board',
-    rawValue,
-    value: result.value,
-  }
-}
-
 const validateUpdateRecord = (
   kind: FeedKind,
   rawValue: unknown,
@@ -441,8 +341,6 @@ export const validateFeedRecord = (
         return validateEvaluationRecord(kind, value, parsedValue)
       case 'org.hypercerts.context.measurement':
         return validateMeasurementRecord(kind, value, parsedValue)
-      case 'org.hyperboards.board':
-        return validateHyperboardRecord(kind, value, parsedValue)
       case 'org.hypercerts.context.attachment':
         return validateUpdateRecord(kind, value, parsedValue)
       case 'app.certified.badge.award':

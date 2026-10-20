@@ -16,7 +16,6 @@ export const FEED_COLLECTIONS = [
   'org.hypercerts.context.evaluation',
   'org.hypercerts.context.measurement',
   'org.hypercerts.context.attachment',
-  'org.hyperboards.board',
   'app.certified.badge.award',
 ] as const
 
@@ -27,7 +26,6 @@ export const FEED_KINDS = [
   'project.created_with_cert',
   'evaluation.create',
   'measurement.create',
-  'hyperboard.create',
   'update.create',
   'endorsement.award',
 ] as const

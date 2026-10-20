@@ -12,8 +12,6 @@ import type {
 } from './types.js'
 import {
   getEndorsedActorDid,
-  sanitizeActorRow,
-  validateBlueskyProfile,
   validateCertifiedProfile,
   validateFeedRecord,
   type ValidatedFeedRecord,
@@ -30,18 +28,13 @@ const requireActorSummary = (
   contexts: ReadonlyMap<string, ActorContext>,
 ): ActorSummary => {
   const context = contexts.get(did)
-  if (
-    context === undefined ||
-    context.did !== did ||
-    (context.actor !== undefined && context.actor.did !== did)
-  ) {
+  if (context?.did !== did) {
     throw identityInvariantError()
   }
 
   return buildActorSummary(
-    sanitizeActorRow(did, context.actor),
+    did,
     validateCertifiedProfile(context.certifiedProfile),
-    validateBlueskyProfile(context.blueskyProfile),
   )
 }
 

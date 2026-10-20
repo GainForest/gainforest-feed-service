@@ -40,7 +40,6 @@
               "project.created_with_cert",
               "evaluation.create",
               "measurement.create",
-              "hyperboard.create",
               "update.create",
               "endorsement.award"
             ]
@@ -71,10 +70,9 @@
     },
     "actorSummary": {
       "type": "object",
-      "description": "Validated current identity fields for one feed actor.",
+      "description": "A feed actor's DID and, when meaningful, validated Certified-profile display fields.",
       "properties": {
         "did": { "type": "string", "format": "did" },
-        "handle": { "type": "string", "format": "handle", "maxLength": 253 },
         "displayName": { "type": "string", "maxLength": 640, "maxGraphemes": 64 },
         "avatar": {
           "type": "union",
@@ -147,12 +145,6 @@
         "target": { "type": "ref", "ref": "com.atproto.repo.strongRef" }
       }
     },
-    "hyperboardView": {
-      "type": "object",
-      "properties": {
-        "createdAt": { "type": "string", "format": "datetime" }
-      }
-    },
     "updateView": {
       "type": "object",
       "properties": {
@@ -183,7 +175,6 @@
             "project.created_with_cert",
             "evaluation.create",
             "measurement.create",
-            "hyperboard.create",
             "update.create",
             "endorsement.award"
           ],
@@ -199,7 +190,6 @@
             "#endorsementView",
             "#evaluationView",
             "#measurementView",
-            "#hyperboardView",
             "#updateView"
           ],
           "description": "Kind-specific content needed to present the entry."

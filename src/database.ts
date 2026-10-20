@@ -49,16 +49,18 @@ export class Database implements DatabaseCompatibilityChecker {
     return this.#pool.query<T>(text, [...values])
   }
 
-  /** Verifies database reachability, Postgres 16 timestamp validation, and read-only session state. */
+  /** Verifies database reachability, Postgres 16 JSON/timestamp validation, and read-only session state. */
   async checkCompatibility(): Promise<DatabaseCompatibility> {
     try {
       const capabilities = await this.#pool.query<{
         server_version_num: number
+        json_validation: boolean
         timestamp_validation: boolean
         transaction_read_only: string
       }>(`
         SELECT
           current_setting('server_version_num')::integer AS server_version_num,
+          pg_input_is_valid('{"valid":true}', 'jsonb') AS json_validation,
           pg_input_is_valid('2026-01-01T00:00:00Z', 'timestamp with time zone') AS timestamp_validation,
           current_setting('transaction_read_only') AS transaction_read_only
       `)
@@ -66,13 +68,13 @@ export class Database implements DatabaseCompatibilityChecker {
       if (!capability || capability.server_version_num < 160000) {
         return {
           compatible: false,
-          reason: 'Postgres 16 or newer is required for safe external-label timestamp parsing; upgrade the database before starting this service.',
+          reason: 'Postgres 16 or newer is required for safe parsing of HappyView JSON and timestamp text; upgrade the database before starting this service.',
         }
       }
-      if (!capability.timestamp_validation) {
+      if (!capability.json_validation || !capability.timestamp_validation) {
         return {
           compatible: false,
-          reason: 'Postgres timestamp input validation is unavailable; verify pg_input_is_valid before starting this service.',
+          reason: 'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
         }
       }
       if (capability.transaction_read_only !== 'on') {
@@ -93,7 +95,7 @@ export class Database implements DatabaseCompatibilityChecker {
       ) {
         return {
           compatible: false,
-          reason: 'Postgres timestamp input validation is unavailable; verify pg_input_is_valid before starting this service.',
+          reason: 'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
         }
       }
       return {

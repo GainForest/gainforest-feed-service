@@ -132,10 +132,6 @@ const allContexts = (): ReadonlyMap<string, ActorContext> =>
       authorDid,
       {
         did: authorDid,
-        actor: {
-          did: authorDid,
-          handle: 'author.example',
-        },
         certifiedProfile: {
           $type: 'app.certified.actor.profile',
           displayName: 'Certified Author',
@@ -206,7 +202,6 @@ describe('HydratedFeedService', () => {
         kind: 'cert.create',
         actor: {
           did: authorDid,
-          handle: 'author.example',
           displayName: 'Certified Author',
         },
         content: {

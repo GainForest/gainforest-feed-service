@@ -2,21 +2,13 @@ import type { BlobRef } from '@atproto/lex'
 
 import type { FeedKind } from '../feed/types.js'
 
-/** Hyperindex actor fields used to build a feed-card identity summary. */
-export interface ActorRow {
-  readonly did: string
-  readonly handle: string | null
-}
-
-/** Current stored identity data for one requested DID. */
+/** Current HappyView Certified-profile data for one requested DID. */
 export interface ActorContext {
   readonly did: string
-  readonly actor?: ActorRow
   readonly certifiedProfile?: unknown
-  readonly blueskyProfile?: unknown
 }
 
-/** Batch seam for reading current actor, Certified-profile, and Bluesky-profile identity data. */
+/** Batch reader for current Certified-profile records. */
 export interface IdentityReader {
   getByDids(
     dids: readonly string[],
@@ -58,15 +50,8 @@ export type UpdateImageReference =
 /** Stable actor identity projected into hydrated feed items. */
 export interface ActorSummary {
   readonly did: string
-  readonly handle?: string
   readonly displayName?: string
   readonly avatar?: ActorImageReference
-}
-
-/** Validated fields from one Hyperindex actor row. */
-export interface SanitizedActorRow {
-  readonly did: string
-  readonly handle?: string
 }
 
 /** First-render fields for an activity feed card. */
@@ -121,12 +106,6 @@ export interface MeasurementFeedView {
   readonly target?: FeedTargetReference
 }
 
-/** Verb-only first-render fields for a Hyperboard card. */
-export interface HyperboardFeedView {
-  readonly $type: 'org.hypercerts.feed.defs#hyperboardView'
-  readonly createdAt?: string
-}
-
 /** First-render fields for an attachment/update card. */
 export interface UpdateFeedView {
   readonly $type: 'org.hypercerts.feed.defs#updateView'
@@ -144,7 +123,6 @@ export type FeedItemView =
   | EndorsementFeedView
   | EvaluationFeedView
   | MeasurementFeedView
-  | HyperboardFeedView
   | UpdateFeedView
 
 /** Hypercerts feed-specific representation attached to one generic feed item. */
