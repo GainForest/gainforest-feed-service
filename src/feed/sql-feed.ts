@@ -21,6 +21,8 @@ export interface NormalizedPageParams {
 }
 
 export interface SqlFeedQueryExecutor {
+  // The caller selects this row shape in SQL, so the generic is necessarily return-only.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- PostgreSQL result rows cannot be inferred from the query string.
   query<Row extends QueryResultRow>(
     text: string,
     values?: readonly unknown[],
@@ -31,6 +33,11 @@ export interface SqlFeedRuntime {
   readonly database: SqlFeedQueryExecutor
   readonly metrics: Metrics
 }
+
+const hasSourceValue = <Row extends InternalFeedRow>(
+  row: Row | (Row & InternalSourceFeedRow),
+): row is Row & InternalSourceFeedRow =>
+  Object.prototype.hasOwnProperty.call(row, 'sourceValue')
 
 export type FeedRowMapper<DatabaseRow, FeedRow extends InternalFeedRow> = (
   row: DatabaseRow,
@@ -87,7 +94,7 @@ export const defineSqlFeed = <
   ): InternalFeedPage<Row> => {
     if (rows.length > fetchLimit) {
       throw new Error(
-        `Feed query for ${definition.id} returned ${rows.length} rows after requesting at most ${fetchLimit}; apply the registered limit inside the SQL statement.`,
+        `Feed query for ${definition.id} returned ${String(rows.length)} rows after requesting at most ${String(fetchLimit)}; apply the registered limit inside the SQL statement.`,
       )
     }
 
@@ -167,12 +174,12 @@ export const defineSqlFeed = <
 
     const rows = result.rows.map((row) => {
       const mapped = definition.mapRow(row, 'with-source')
-      if (!Object.prototype.hasOwnProperty.call(mapped, 'sourceValue')) {
+      if (!hasSourceValue(mapped)) {
         throw new Error(
           `Feed row mapper for ${definition.id} returned metadata without sourceValue in with-source mode; return the exact selected source or reject the row.`,
         )
       }
-      return mapped as FeedRow & InternalSourceFeedRow
+      return mapped
     })
     return finishPage(rows, normalized, fetchLimit)
   }

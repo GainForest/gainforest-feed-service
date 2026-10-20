@@ -27,8 +27,7 @@ type JsonProcedure = Procedure<
   NsidString,
   ParamsSchema,
   Payload<'application/json', Schema<LexValue>>,
-  Payload<'application/json', Schema<LexValue>>,
-  readonly string[] | undefined
+  Payload<'application/json', Schema<LexValue>>
 >
 
 type FeedProcedureOutputParser<Output> = (
@@ -92,6 +91,7 @@ export const registerFeedProcedure = <Output>({
       void
     > = async ({ input }) =>
       handler(
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- LexRouter dispatches only after the procedure's generated input parser succeeds.
         (input as unknown as { body: GetFeedSkeletonInput }).body,
         undefined,
       )
@@ -102,6 +102,7 @@ export const registerFeedProcedure = <Output>({
       ServiceAuthCredentials | undefined
     > = async ({ input, credentials }) =>
       handler(
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- LexRouter dispatches only after the procedure's generated input parser succeeds.
         (input as unknown as { body: GetFeedSkeletonInput }).body,
         credentials,
       )

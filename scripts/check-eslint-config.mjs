@@ -68,6 +68,12 @@ await assertRuleCount(
   1,
 )
 await assertRuleCount(
+  'src/database.ts',
+  "import client from 'prom-client'\nvoid client",
+  'no-restricted-imports',
+  1,
+)
+await assertRuleCount(
   'src/metrics.ts',
   "import client from 'prom-client'\nvoid client",
   'no-restricted-imports',
@@ -90,6 +96,24 @@ await assertRuleCount(
   "import { helper } from '../api/get-feed.js'\nvoid helper",
   'no-restricted-imports',
   0,
+)
+await assertRuleCount(
+  'src/feed/query.ts',
+  'const value: any = 1\nvoid value',
+  '@typescript-eslint/no-explicit-any',
+  1,
+)
+await assertRuleCount(
+  'src/feed/query.ts',
+  "const value: string = JSON.parse('{}')\nvoid value",
+  '@typescript-eslint/no-unsafe-assignment',
+  1,
+)
+await assertRuleCount(
+  'src/feed/query.ts',
+  'const value = ({} as unknown) as string\nvoid value',
+  '@typescript-eslint/no-unsafe-type-assertion',
+  1,
 )
 await assertRuleCount(
   'test/app.unit.test.ts',

@@ -35,6 +35,8 @@ const parseCertifiedProfile = (value: unknown): unknown => {
 
 /** Narrow structural query capability used by the identity adapter. */
 export interface IdentityQueryExecutor {
+  // The caller selects this row shape in SQL, so the generic is necessarily return-only.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-parameters -- PostgreSQL result rows cannot be inferred from the query string.
   query<T extends QueryResultRow>(
     text: string,
     values?: readonly unknown[],

@@ -43,7 +43,7 @@ const requestTooLargeResponse = (): Response =>
   jsonResponse(
     {
       error: FeedErrorCode.InvalidRequest,
-      message: `Request body exceeds the ${MAX_REQUEST_BODY_BYTES}-byte limit; remove unnecessary feed parameters or other fields before retrying.`,
+      message: `Request body exceeds the ${String(MAX_REQUEST_BODY_BYTES)}-byte limit; remove unnecessary feed parameters or other fields before retrying.`,
     },
     413,
   )
@@ -129,11 +129,13 @@ const readBoundedRequest = async (
   ) {
     return requestTooLargeResponse()
   }
+  // Node's Request.body is null for bodyless requests even though its type is non-null.
   if (request.body === null) return request
 
   const reader = request.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- The stream loop exits only when reader.read() reports done.
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -218,6 +220,9 @@ const normalizeLexiconValidationError = async (
   )
 }
 
+const isFeedErrorCode = (value: string): value is FeedErrorCode =>
+  Object.values(FeedErrorCode).some((code) => code === value)
+
 const observeResponseError = async (
   response: Response,
   metrics: Metrics,
@@ -235,11 +240,11 @@ const observeResponseError = async (
     body === null ||
     !('error' in body) ||
     typeof body.error !== 'string' ||
-    !Object.values(FeedErrorCode).includes(body.error as FeedErrorCode)
+    !isFeedErrorCode(body.error)
   ) {
     return
   }
-  metrics.observeError(body.error as FeedErrorCode)
+  metrics.observeError(body.error)
 }
 
 const handleRootRequest = (request: Request): Response =>

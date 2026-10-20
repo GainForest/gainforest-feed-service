@@ -21,7 +21,9 @@ export const listenMetricsServer = (
   host: string,
 ): Promise<void> =>
   new Promise<void>((resolve, reject) => {
-    const onError = (error: Error): void => reject(error)
+    const onError = (error: Error): void => {
+      reject(error)
+    }
     server.once('error', onError)
     server.listen(port, host, () => {
       server.off('error', onError)
@@ -49,7 +51,9 @@ export const closeMetricsServer = (
       server.closeAllConnections()
       finish()
     }, timeoutMs)
-    server.close((error) => finish(error ?? undefined))
+    server.close((error) => {
+      finish(error ?? undefined)
+    })
   })
 }
 
@@ -89,7 +93,9 @@ export const createMetricsServer = (
         })
         response.end(body)
       },
-      () => textResponse(response, 500, 'Metrics collection failed\n'),
+      () => {
+        textResponse(response, 500, 'Metrics collection failed\n')
+      },
     )
   })
   server.requestTimeout = options.requestTimeoutMs

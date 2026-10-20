@@ -71,7 +71,7 @@ const buildHydratedFeedItems = (
 ): HydratedFeedItem[] =>
   validatedRows.map(({ row, record, endorsedDid }) => {
     const actor = summaries.get(row.actorDid)
-    if (actor === undefined || actor.did !== row.actorDid) {
+    if (actor?.did !== row.actorDid) {
       throw identityInvariantError()
     }
     const endorsedActor =

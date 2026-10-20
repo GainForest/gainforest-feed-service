@@ -6,6 +6,12 @@ import tseslint from 'typescript-eslint'
 
 const typedFiles = ['src/**/*.ts', 'test/**/*.ts', 'vitest.config.ts']
 
+const unsafeTypeRules = Object.fromEntries(
+  Object.keys(tseslint.plugin.rules)
+    .filter((ruleName) => ruleName.startsWith('no-unsafe-'))
+    .map((ruleName) => [`@typescript-eslint/${ruleName}`, 'error']),
+)
+
 const pgRestriction = {
   name: 'pg',
   message:
@@ -65,21 +71,12 @@ export default [
       ],
       '@typescript-eslint/consistent-type-imports': [
         'error',
-        { prefer: 'type-imports', fixStyle: 'separate-type-imports' },
+        { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
-      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-floating-promises': 'error',
       '@typescript-eslint/no-misused-promises': 'error',
-      '@typescript-eslint/no-unsafe-argument': 'off',
-      '@typescript-eslint/no-unsafe-assignment': 'off',
-      '@typescript-eslint/no-unsafe-call': 'off',
-      '@typescript-eslint/no-unsafe-declaration-merging': 'off',
-      '@typescript-eslint/no-unsafe-enum-assignment': 'off',
-      '@typescript-eslint/no-unsafe-enum-comparison': 'off',
-      '@typescript-eslint/no-unsafe-function-type': 'off',
-      '@typescript-eslint/no-unsafe-member-access': 'off',
-      '@typescript-eslint/no-unsafe-return': 'off',
-      '@typescript-eslint/no-unsafe-unary-minus': 'off',
+      ...unsafeTypeRules,
       '@typescript-eslint/no-unnecessary-condition': 'error',
       '@typescript-eslint/no-unnecessary-type-assertion': 'error',
       '@typescript-eslint/no-unused-vars': [
@@ -134,6 +131,23 @@ export default [
         {
           paths: [
             pgRestriction,
+            {
+              name: 'prom-client',
+              message:
+                'Import prom-client only in src/metrics.ts and expose metrics operations through that adapter.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/database.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
             {
               name: 'prom-client',
               message:

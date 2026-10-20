@@ -152,11 +152,7 @@ const buildEndorsementView = (
   context: FeedViewContext,
 ): EndorsementFeedView => {
   const subjectDid = getEndorsedActorDid(record)
-  if (
-    subjectDid === undefined ||
-    context.endorsedActor === undefined ||
-    context.endorsedActor.did !== subjectDid
-  ) {
+  if (subjectDid === undefined || context.endorsedActor?.did !== subjectDid) {
     throw endorsementViewInvariantError()
   }
   return {
@@ -193,7 +189,7 @@ const buildMeasurementView = (
 const buildUpdateView = (
   value: FeedRecordValue<'org.hypercerts.context.attachment'>,
 ): UpdateFeedView => {
-  const imageBlob = value.content?.find(
+  const imageBlob: unknown = value.content?.find(
     (entry) =>
       isObject(entry) &&
       entry.$type === 'org.hypercerts.defs#smallBlob' &&

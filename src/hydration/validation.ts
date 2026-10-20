@@ -1,8 +1,6 @@
 import {
-  graphemeLen,
   isBlobRef,
   jsonToLex as jsonToProtocolLex,
-  utf8Len,
   type BlobRef,
 } from '@atproto/lex'
 import { jsonToLex as jsonToLegacyLex } from '@atproto/lexicon'
@@ -38,6 +36,8 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 export const toProtocolBlobRef = (blob: unknown): BlobRef | undefined => {
   try {
     if (isBlobRef(blob)) return blob
+    // The JSON round-trip creates the parser's JsonValue input from indexed JSON.
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- jsonToLex performs strict validation before the value is used.
     const json = JSON.parse(JSON.stringify(blob)) as Parameters<
       typeof jsonToProtocolLex
     >[0]
@@ -99,7 +99,7 @@ export const validateCertifiedProfile = (
   try {
     // The generated validator requires its own BlobRef class, so the parser and
     // @hypercerts-org/lexicon must resolve the same @atproto/lexicon version.
-    const indexedJson = value as Parameters<typeof jsonToLegacyLex>[0]
+    const indexedJson = value
     const result = AppCertifiedActorProfile.validateRecord(
       jsonToLegacyLex(indexedJson),
     )
@@ -116,14 +116,12 @@ export const validateCertifiedProfile = (
 export const isMeaningfulCertifiedProfile = (
   profile: ValidatedCertifiedProfile,
 ): boolean =>
-  Boolean(
-    profile.displayName ||
-    profile.description ||
-    profile.avatar ||
-    profile.banner ||
-    profile.pronouns ||
-    profile.website,
-  )
+  (profile.displayName !== undefined && profile.displayName !== '') ||
+  (profile.description !== undefined && profile.description !== '') ||
+  profile.avatar !== undefined ||
+  profile.banner !== undefined ||
+  (profile.pronouns !== undefined && profile.pronouns !== '') ||
+  (profile.website !== undefined && profile.website !== '')
 
 export type ValidatedFeedRecord =
   | {
@@ -323,9 +321,7 @@ export const validateFeedRecord = (
   if (!hasRecordType(value, collection)) return undefined
 
   try {
-    const parsedValue = jsonToLegacyLex(
-      value as Parameters<typeof jsonToLegacyLex>[0],
-    )
+    const parsedValue = jsonToLegacyLex(value)
     switch (collection) {
       case 'org.hypercerts.claim.activity':
         return validateActivityRecord(kind, value, parsedValue)

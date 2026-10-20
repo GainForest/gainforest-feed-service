@@ -51,8 +51,9 @@ const metricsServer =
     ? undefined
     : createMetricsServer(metrics, {
         requestTimeoutMs: config.requestTimeoutMs,
-        onError: (error) =>
-          logger.error({ err: error }, 'metrics server error'),
+        onError: (error) => {
+          logger.error({ err: error }, 'metrics server error')
+        },
       })
 // Node's request timeout bounds receiving the request, not handler or database work.
 server.requestTimeout = config.requestTimeoutMs
@@ -73,10 +74,12 @@ try {
   }
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
-    server.listen(config.port, config.host, () => resolve())
+    server.listen(config.port, config.host, () => {
+      resolve()
+    })
   })
 } catch (cause) {
-  if (metricsServer?.listening) {
+  if (metricsServer?.listening === true) {
     try {
       await closeMetricsServer(metricsServer, config.gracefulShutdownMs)
     } catch (error) {

@@ -32,6 +32,9 @@ const HYPERCERTS_FEED_QUERY = readFileSync(
 )
 const FEED_KIND_SET = new Set<string>(FEED_KINDS)
 
+const isFeedKind = (value: string): value is FeedKind =>
+  FEED_KIND_SET.has(value)
+
 interface HypercertsFeedQueryRow extends QueryResultRow {
   readonly uri: string | null
   readonly cid: string | null
@@ -72,7 +75,7 @@ const parseHypercertsFeedParams = (input: {
     parsed = hypercertsFeedParamsSchema.schema.$parse(input)
   } catch (cause) {
     const detail =
-      cause instanceof Error && cause.message ? `: ${cause.message}` : ''
+      cause instanceof Error && cause.message !== '' ? `: ${cause.message}` : ''
     throw new FeedError(
       FeedErrorCode.InvalidRequest,
       `params does not match ${HYPERCERTS_FEED_PARAMS_TYPE}${detail}; correct the feed parameters and retry.`,
@@ -109,7 +112,7 @@ const mapHypercertsFeedRow: FeedRowMapper<
     typeof row.collection !== 'string' ||
     typeof row.actor_did !== 'string' ||
     typeof row.kind !== 'string' ||
-    !FEED_KIND_SET.has(row.kind) ||
+    !isFeedKind(row.kind) ||
     typeof row.sort_value !== 'string'
   ) {
     throw metadataInvariantError()
@@ -120,7 +123,7 @@ const mapHypercertsFeedRow: FeedRowMapper<
     cid: row.cid,
     collection: row.collection,
     actorDid: row.actor_did,
-    kind: row.kind as FeedKind,
+    kind: row.kind,
     sortValue: row.sort_value,
   }
   if (mode === 'metadata') return metadata
