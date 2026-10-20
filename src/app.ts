@@ -219,8 +219,10 @@ const normalizeLexiconValidationError = async (
   )
 }
 
+const feedErrorCodes: ReadonlySet<string> = new Set(Object.values(FeedErrorCode))
+
 const isFeedErrorCode = (value: string): value is FeedErrorCode =>
-  Object.values(FeedErrorCode).some((code) => code === value)
+  feedErrorCodes.has(value)
 
 const observeResponseError = async (
   response: Response,
