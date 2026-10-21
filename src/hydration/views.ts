@@ -77,10 +77,7 @@ export const buildActorSummary = (
   did: string,
   certifiedProfile: ValidatedCertifiedProfile | undefined,
 ): ActorSummary => {
-  if (
-    certifiedProfile &&
-    isMeaningfulCertifiedProfile(certifiedProfile)
-  ) {
+  if (certifiedProfile && isMeaningfulCertifiedProfile(certifiedProfile)) {
     const avatar = smallImageReference(certifiedProfile.avatar)
     return {
       did,
@@ -108,12 +105,8 @@ const endorsementViewInvariantError = (): Error =>
     'Endorsement view failed because the endorsed account could not be matched to its discovered identity; verify endorsement DID discovery and identity mapping before serving hydrated pages.',
   )
 
-type FeedRecordValue<
-  Collection extends ValidatedFeedRecord['collection'],
-> = Extract<
-  ValidatedFeedRecord,
-  { readonly collection: Collection }
->['value']
+type FeedRecordValue<Collection extends ValidatedFeedRecord['collection']> =
+  Extract<ValidatedFeedRecord, { readonly collection: Collection }>['value']
 
 type EndorsementRecord = Extract<
   ValidatedFeedRecord,
@@ -159,11 +152,7 @@ const buildEndorsementView = (
   context: FeedViewContext,
 ): EndorsementFeedView => {
   const subjectDid = getEndorsedActorDid(record)
-  if (
-    subjectDid === undefined ||
-    context.endorsedActor === undefined ||
-    context.endorsedActor.did !== subjectDid
-  ) {
+  if (subjectDid === undefined || context.endorsedActor?.did !== subjectDid) {
     throw endorsementViewInvariantError()
   }
   return {
@@ -200,7 +189,7 @@ const buildMeasurementView = (
 const buildUpdateView = (
   value: FeedRecordValue<'org.hypercerts.context.attachment'>,
 ): UpdateFeedView => {
-  const imageBlob = value.content?.find(
+  const imageBlob: unknown = value.content?.find(
     (entry) =>
       isObject(entry) &&
       entry.$type === 'org.hypercerts.defs#smallBlob' &&

@@ -1,4 +1,3 @@
-import type { QueryResultRow } from 'pg'
 import { describe, expect, it } from 'vitest'
 
 import { createHypercertsFeed } from '../src/feed/query.js'
@@ -14,24 +13,33 @@ const trustedLabeler = 'did:plc:ragtjsm2j2vknwkz3zp4oxrd'
 const uri = `at://${actorDid}/org.hypercerts.claim.activity/3kpn`
 const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
 
-class FakeQueryExecutor implements SqlFeedQueryExecutor {
-  readonly calls: Array<{
+type HypercertsFeedQueryRow =
+  Parameters<
+    typeof createHypercertsFeed
+  >[0]['database'] extends SqlFeedQueryExecutor<infer Row>
+    ? Row
+    : never
+
+class FakeQueryExecutor implements SqlFeedQueryExecutor<HypercertsFeedQueryRow> {
+  readonly calls: {
     readonly text: string
     readonly values: readonly unknown[]
-  }> = []
+  }[] = []
 
-  constructor(private readonly rows: readonly Record<string, unknown>[]) {}
+  constructor(private readonly rows: readonly HypercertsFeedQueryRow[]) {}
 
-  async query<Row extends QueryResultRow>(
+  query(
     text: string,
     values: readonly unknown[] = [],
-  ): Promise<{ readonly rows: readonly Row[] }> {
+  ): Promise<{ readonly rows: readonly HypercertsFeedQueryRow[] }> {
     this.calls.push({ text, values })
-    return { rows: this.rows as unknown as readonly Row[] }
+    return Promise.resolve({ rows: this.rows })
   }
 }
 
-const resultRow = (overrides: Record<string, unknown> = {}) => ({
+const resultRow = (
+  overrides: Partial<HypercertsFeedQueryRow> = {},
+): HypercertsFeedQueryRow => ({
   uri,
   cid,
   collection: 'org.hypercerts.claim.activity',
@@ -60,10 +68,9 @@ describe('Hypercerts SQL feed definition', () => {
         source_json: null,
       }),
     ])
-    const feed = createHypercertsFeed(
-      { database, metrics: new Metrics() },
-      [trustedLabeler],
-    )
+    const feed = createHypercertsFeed({ database, metrics: new Metrics() }, [
+      trustedLabeler,
+    ])
 
     await expect(
       feed.loadPage(params, { limit: 2 }, 'metadata'),
@@ -100,16 +107,18 @@ describe('Hypercerts SQL feed definition', () => {
 
   it('rejects structural and semantic params failures before querying', async () => {
     const database = new FakeQueryExecutor([])
-    const feed = createHypercertsFeed(
-      { database, metrics: new Metrics() },
-      [],
-    )
+    const feed = createHypercertsFeed({ database, metrics: new Metrics() }, [])
 
-    await expect(
-      feed.loadPage({ $type: paramsType }, {}, 'metadata'),
-    ).rejects.toMatchObject({
+    const invalidViewerRequest = feed.loadPage(
+      { $type: paramsType },
+      {},
+      'metadata',
+    )
+    await expect(invalidViewerRequest).rejects.toThrow(
+      /viewerDid is not a valid DID/,
+    )
+    await expect(invalidViewerRequest).rejects.toMatchObject({
       code: 'InvalidRequest',
-      message: expect.stringContaining('viewerDid is not a valid DID'),
     })
     await expect(
       feed.loadPage(
@@ -129,10 +138,7 @@ describe('Hypercerts SQL feed definition', () => {
     const database = new FakeQueryExecutor([
       resultRow({ source_json: JSON.stringify(sourceValue) }),
     ])
-    const feed = createHypercertsFeed(
-      { database, metrics: new Metrics() },
-      [],
-    )
+    const feed = createHypercertsFeed({ database, metrics: new Metrics() }, [])
 
     await expect(
       feed.loadPage(params, { limit: 2 }, 'with-source'),
@@ -151,9 +157,9 @@ describe('Hypercerts SQL feed definition', () => {
     })
     expect(database.calls[0]?.values[11]).toBe(true)
     const sql = database.calls[0]?.text ?? ''
-    expect(sql.indexOf('selected_source.record AS source_json')).toBeGreaterThan(
-      sql.indexOf('paged_events AS'),
-    )
+    expect(
+      sql.indexOf('selected_source.record AS source_json'),
+    ).toBeGreaterThan(sql.indexOf('paged_events AS'))
     expect(sql).toContain('ON $12::boolean')
     expect(sql).toContain('selected_source.uri = page.uri')
     expect(sql).toContain('selected_source.cid = page.cid')
@@ -185,19 +191,22 @@ describe('Hypercerts SQL feed definition', () => {
     { actor_did: null },
     { kind: null },
     { sort_value: null },
-  ])('fails instead of silently dropping incomplete metadata: %o', async (overrides) => {
-    const feed = createHypercertsFeed(
-      {
-        database: new FakeQueryExecutor([resultRow(overrides)]),
-        metrics: new Metrics(),
-      },
-      [],
-    )
+  ])(
+    'fails instead of silently dropping incomplete metadata: %o',
+    async (overrides) => {
+      const feed = createHypercertsFeed(
+        {
+          database: new FakeQueryExecutor([resultRow(overrides)]),
+          metrics: new Metrics(),
+        },
+        [],
+      )
 
-    await expect(
-      feed.loadPage(params, { limit: 2 }, 'metadata'),
-    ).rejects.toThrow('metadata invariant failed')
-  })
+      await expect(
+        feed.loadPage(params, { limit: 2 }, 'metadata'),
+      ).rejects.toThrow('metadata invariant failed')
+    },
+  )
 
   it('preserves a present JSON null source value', async () => {
     const feed = createHypercertsFeed(
@@ -220,17 +229,20 @@ describe('Hypercerts SQL feed definition', () => {
     { selected_source_cid: 'bafyreimismatch' },
     { selected_source_collection: null },
     { selected_source_collection: 'org.hypercerts.collection' },
-  ])('rejects a missing or mismatched selected source: %o', async (overrides) => {
-    const feed = createHypercertsFeed(
-      {
-        database: new FakeQueryExecutor([resultRow(overrides)]),
-        metrics: new Metrics(),
-      },
-      [],
-    )
+  ])(
+    'rejects a missing or mismatched selected source: %o',
+    async (overrides) => {
+      const feed = createHypercertsFeed(
+        {
+          database: new FakeQueryExecutor([resultRow(overrides)]),
+          metrics: new Metrics(),
+        },
+        [],
+      )
 
-    await expect(
-      feed.loadPage(params, { limit: 2 }, 'with-source'),
-    ).rejects.toThrow('source invariant failed')
-  })
+      await expect(
+        feed.loadPage(params, { limit: 2 }, 'with-source'),
+      ).rejects.toThrow('source invariant failed')
+    },
+  )
 })

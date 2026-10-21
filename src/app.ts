@@ -43,7 +43,7 @@ const requestTooLargeResponse = (): Response =>
   jsonResponse(
     {
       error: FeedErrorCode.InvalidRequest,
-      message: `Request body exceeds the ${MAX_REQUEST_BODY_BYTES}-byte limit; remove unnecessary feed parameters or other fields before retrying.`,
+      message: `Request body exceeds the ${String(MAX_REQUEST_BODY_BYTES)}-byte limit; remove unnecessary feed parameters or other fields before retrying.`,
     },
     413,
   )
@@ -123,23 +123,27 @@ const readBoundedRequest = async (
   request: Request,
 ): Promise<Request | Response> => {
   const declaredLength = request.headers.get('content-length')
-  if (declaredLength !== null && Number(declaredLength) > MAX_REQUEST_BODY_BYTES) {
+  if (
+    declaredLength !== null &&
+    Number(declaredLength) > MAX_REQUEST_BODY_BYTES
+  ) {
     return requestTooLargeResponse()
   }
+  // Node's Request.body is null for bodyless requests even though its type is non-null.
   if (request.body === null) return request
 
   const reader = request.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    size += value.byteLength
+  let result = await reader.read()
+  while (!result.done) {
+    size += result.value.byteLength
     if (size > MAX_REQUEST_BODY_BYTES) {
       await reader.cancel('request body limit exceeded')
       return requestTooLargeResponse()
     }
-    chunks.push(value)
+    chunks.push(result.value)
+    result = await reader.read()
   }
 
   const body = new Uint8Array(size)
@@ -215,6 +219,13 @@ const normalizeLexiconValidationError = async (
   )
 }
 
+const feedErrorCodes: ReadonlySet<string> = new Set(
+  Object.values(FeedErrorCode),
+)
+
+const isFeedErrorCode = (value: string): value is FeedErrorCode =>
+  feedErrorCodes.has(value)
+
 const observeResponseError = async (
   response: Response,
   metrics: Metrics,
@@ -232,11 +243,11 @@ const observeResponseError = async (
     body === null ||
     !('error' in body) ||
     typeof body.error !== 'string' ||
-    !Object.values(FeedErrorCode).includes(body.error as FeedErrorCode)
+    !isFeedErrorCode(body.error)
   ) {
     return
   }
-  metrics.observeError(body.error as FeedErrorCode)
+  metrics.observeError(body.error)
 }
 
 const handleRootRequest = (request: Request): Response =>
@@ -285,17 +296,11 @@ const handleReadyRequest = async (
 
   const startedAt = performance.now()
   const compatibility = await database.checkCompatibility()
-  metrics.observeDatabase(
-    'readiness',
-    (performance.now() - startedAt) / 1_000,
-  )
+  metrics.observeDatabase('readiness', (performance.now() - startedAt) / 1_000)
   metrics.setReady(compatibility.compatible)
   return compatibility.compatible
     ? jsonResponse({ status: 'ready' })
-    : jsonResponse(
-        { status: 'not_ready', reason: compatibility.reason },
-        503,
-      )
+    : jsonResponse({ status: 'not_ready', reason: compatibility.reason }, 503)
 }
 
 const handleFeedRequest = async (
@@ -371,7 +376,10 @@ export const createApp = (
   const router = new LexRouter({
     onHandlerError: ({ error, method }) => {
       if (error instanceof LexServerError) return
-      logger.error({ err: error, nsid: method.nsid }, 'unexpected XRPC handler error')
+      logger.error(
+        { err: error, nsid: method.nsid },
+        'unexpected XRPC handler error',
+      )
     },
   })
   registerGetFeedSkeleton(router, services.skeleton, logger, auth)

@@ -27,7 +27,10 @@ export class Metrics {
 
   /** Creates an isolated registry so tests and multiple app instances do not share labels. */
   constructor() {
-    collectDefaultMetrics({ register: this.registry, prefix: 'hypercerts_feed_' })
+    collectDefaultMetrics({
+      register: this.registry,
+      prefix: 'hypercerts_feed_',
+    })
     this.#requests = new Counter({
       name: 'hypercerts_feed_http_requests_total',
       help: 'HTTP requests handled by route, method, and status.',
@@ -82,11 +85,17 @@ export class Metrics {
   ): void {
     const methodLabel = boundedHttpMethod(method)
     this.#requests.inc({ route, method: methodLabel, status: String(status) })
-    this.#requestDuration.observe({ route, method: methodLabel }, durationSeconds)
+    this.#requestDuration.observe(
+      { route, method: methodLabel },
+      durationSeconds,
+    )
   }
 
   /** Records the duration of one named database operation. */
-  observeDatabase(operation: 'feed' | 'readiness', durationSeconds: number): void {
+  observeDatabase(
+    operation: 'feed' | 'readiness',
+    durationSeconds: number,
+  ): void {
     this.#databaseDuration.observe({ operation }, durationSeconds)
   }
 

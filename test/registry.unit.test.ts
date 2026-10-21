@@ -27,11 +27,11 @@ const row: InternalFeedRow = {
 }
 
 class FakeRegisteredFeed implements RegisteredFeed {
-  readonly loadCalls: Array<{
+  readonly loadCalls: {
     readonly params: FeedParams | undefined
     readonly pagination: FeedPagination
     readonly mode: FeedPageMode
-  }> = []
+  }[] = []
 
   constructor(
     readonly id: string,
@@ -48,15 +48,17 @@ class FakeRegisteredFeed implements RegisteredFeed {
     pagination: FeedPagination,
     mode: 'with-source',
   ): Promise<InternalFeedPage<InternalSourceFeedRow>>
-  async loadPage(
+  loadPage(
     params: FeedParams | undefined,
     pagination: FeedPagination,
     mode: FeedPageMode,
   ): Promise<InternalFeedPage<InternalFeedRow | InternalSourceFeedRow>> {
     this.loadCalls.push({ params, pagination, mode })
-    return mode === 'metadata'
-      ? { rows: [row] }
-      : { rows: [{ ...row, sourceValue: { title: 'Source' } }] }
+    return Promise.resolve(
+      mode === 'metadata'
+        ? { rows: [row] }
+        : { rows: [{ ...row, sourceValue: { title: 'Source' } }] },
+    )
   }
 }
 
@@ -79,10 +81,7 @@ describe('FeedRegistry', () => {
     const registry = new FeedRegistry([feed])
 
     await expect(
-      registry.loadPage(
-        { feedId, limit: 10, cursor: 'next-page' },
-        'metadata',
-      ),
+      registry.loadPage({ feedId, limit: 10, cursor: 'next-page' }, 'metadata'),
     ).resolves.toEqual({ rows: [row] })
     expect(feed.loadCalls).toEqual([
       {
@@ -97,11 +96,10 @@ describe('FeedRegistry', () => {
     const feed = new FakeRegisteredFeed(feedId, paramsType)
     const registry = new FeedRegistry([feed])
 
-    await expect(
-      registry.loadPage({ feedId }, 'metadata'),
-    ).rejects.toMatchObject({
+    const missingParamsRequest = registry.loadPage({ feedId }, 'metadata')
+    await expect(missingParamsRequest).rejects.toThrow(paramsType)
+    await expect(missingParamsRequest).rejects.toMatchObject({
       code: FeedErrorCode.InvalidRequest,
-      message: expect.stringContaining(paramsType),
     })
     expect(feed.loadCalls).toEqual([])
   })
@@ -128,7 +126,7 @@ describe('FeedRegistry', () => {
           new FakeRegisteredFeed(feedId, paramsType),
           new FakeRegisteredFeed(feedId, paramsType),
         ]),
-    ).toThrowError(expect.objectContaining({ message: expect.stringContaining(feedId) }))
+    ).toThrow(feedId)
   })
 
   it('rejects an unknown feed before inspecting its params', async () => {
@@ -151,17 +149,16 @@ describe('FeedRegistry', () => {
     const feed = new FakeRegisteredFeed(feedId, paramsType)
     const registry = new FeedRegistry([feed])
 
-    await expect(
-      registry.loadPage(
-        {
-          feedId,
-          params: { $type: 'org.hypercerts.feed.defs#otherParams' },
-        },
-        'metadata',
-      ),
-    ).rejects.toMatchObject({
+    const mismatchedParamsRequest = registry.loadPage(
+      {
+        feedId,
+        params: { $type: 'org.hypercerts.feed.defs#otherParams' },
+      },
+      'metadata',
+    )
+    await expect(mismatchedParamsRequest).rejects.toThrow(paramsType)
+    await expect(mismatchedParamsRequest).rejects.toMatchObject({
       code: FeedErrorCode.InvalidRequest,
-      message: expect.stringContaining(paramsType),
     })
     expect(feed.loadCalls).toEqual([])
   })

@@ -33,10 +33,10 @@ const row = (suffix: string, sortValue: string): InternalFeedRow => ({
 })
 
 class FakePageLoader implements FeedPageLoader {
-  readonly calls: Array<{
+  readonly calls: {
     readonly input: GetFeedSkeletonInput
     readonly mode: FeedPageMode
-  }> = []
+  }[] = []
 
   constructor(private readonly page: InternalFeedPage<InternalFeedRow>) {}
 
@@ -48,21 +48,21 @@ class FakePageLoader implements FeedPageLoader {
     input: GetFeedSkeletonInput,
     mode: 'with-source',
   ): Promise<InternalFeedPage<InternalSourceFeedRow>>
-  async loadPage(
+  loadPage(
     input: GetFeedSkeletonInput,
     mode: FeedPageMode,
   ): Promise<InternalFeedPage<InternalFeedRow | InternalSourceFeedRow>> {
     this.calls.push({ input, mode })
     if (mode === 'with-source') {
-      return {
+      return Promise.resolve({
         rows: this.page.rows.map((item) => ({
           ...item,
           sourceValue: {},
         })),
         ...(this.page.cursor === undefined ? {} : { cursor: this.page.cursor }),
-      }
+      })
     }
-    return this.page
+    return Promise.resolve(this.page)
   }
 }
 
@@ -72,7 +72,9 @@ describe('FeedService', () => {
       row('2', '2026-07-21T10:00:02.000000Z'),
       row('1', '2026-07-21T10:00:01.000000Z'),
     ]
-    const cursor = encodeCursor(feedId, rows[1]!, timestampUriCursor)
+    const lastRow = rows.at(-1)
+    if (lastRow === undefined) throw new Error('expected a cursor row')
+    const cursor = encodeCursor(feedId, lastRow, timestampUriCursor)
     const pages = new FakePageLoader({ rows, cursor })
     const service = new FeedService(pages)
 
@@ -90,8 +92,10 @@ describe('FeedService', () => {
       }),
     )
 
-    await expect(service.getFeedSkeleton(input)).resolves.toEqual(
-      expect.not.objectContaining({ cursor: expect.anything() }),
-    )
+    const output = await service.getFeedSkeleton(input)
+    expect(output.feed).toEqual([
+      { subject: row('1', '2026-07-21T10:00:01.000000Z').uri },
+    ])
+    expect(Object.hasOwn(output, 'cursor')).toBe(false)
   })
 })

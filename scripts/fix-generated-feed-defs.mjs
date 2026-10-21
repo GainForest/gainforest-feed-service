@@ -2,9 +2,7 @@ import { readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const generatedRoot = fileURLToPath(
-  new URL('../src/lexicons', import.meta.url),
-)
+const generatedRoot = fileURLToPath(new URL('../src/lexicons', import.meta.url))
 
 // @atproto/lex emits explicit schema generics whose optional properties
 // conflict with exactOptionalPropertyTypes. Inference preserves the same
@@ -28,11 +26,7 @@ let files
 try {
   files = await definitionFiles(generatedRoot)
 } catch (cause) {
-  if (
-    cause instanceof Error &&
-    'code' in cause &&
-    cause.code === 'ENOENT'
-  ) {
+  if (cause instanceof Error && 'code' in cause && cause.code === 'ENOENT') {
     throw new Error(
       `Expected generated Lexicon definitions under ${generatedRoot}, but lex build did not create them; run lex build with the repository's lexicons and output directory, then verify that path exists.`,
       { cause },

@@ -10,9 +10,7 @@ export interface ActorContext {
 
 /** Batch reader for current Certified-profile records. */
 export interface IdentityReader {
-  getByDids(
-    dids: readonly string[],
-  ): Promise<ReadonlyMap<string, ActorContext>>
+  getByDids(dids: readonly string[]): Promise<ReadonlyMap<string, ActorContext>>
 }
 
 /** Protocol-native external image URI. */
@@ -40,12 +38,8 @@ export interface SmallBlobImageReference {
 }
 
 export type ActorImageReference = UriImageReference | SmallImageReference
-export type CollectionImageReference =
-  | ActorImageReference
-  | LargeImageReference
-export type UpdateImageReference =
-  | UriImageReference
-  | SmallBlobImageReference
+export type CollectionImageReference = ActorImageReference | LargeImageReference
+export type UpdateImageReference = UriImageReference | SmallBlobImageReference
 
 /** Stable actor identity projected into hydrated feed items. */
 export interface ActorSummary {

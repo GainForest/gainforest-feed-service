@@ -57,6 +57,15 @@ jobs:
             npm run changeset:status -- --since "$BASE_SHA"
           fi
 
+      - name: Generate Lexicon TypeScript
+        run: npm run codegen
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
       - name: Type-check
         run: npm run check
 

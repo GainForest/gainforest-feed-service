@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src/lexicons/
+coverage/
+lexicons/app/
+lexicons/com/
+lexicons.json
+package-lock.json
+CHANGELOG.md
+.changeset/CHANGELOG.md

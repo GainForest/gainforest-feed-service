@@ -27,6 +27,10 @@ Before changing feed behavior, read together:
 npm install                    # local setup; use npm ci for a clean reproducible install
 npm run dev                    # watch TypeScript and src/feed/feed-query.sql
 npm run codegen                # regenerate ignored Lexicon TypeScript
+npm run lint                   # codegen via prelint, then strict typed ESLint
+npm run lint:fix               # apply ESLint autofixes
+npm run format                 # format maintained TS/MJS/MD/YAML/JSON files
+npm run format:check           # verify Prettier formatting
 npm run changeset              # add a versioned release-note fragment
 npm run changeset:empty        # add a no-version-bump fragment
 npm run check                  # strict TypeScript check
@@ -48,13 +52,15 @@ TEST_DATABASE_URL='postgresql://...' npm run test:integration:happyview
 
 Never target a shared, staging, or production database. The suite creates contractual tables and rows but does not drop or truncate existing tables. `test:integration:happyview` requires `psql`, checks the HappyView columns used by the service, then runs the behavior suite. The suite writes synthetic records and labels and does not apply migrations. It does not test real record or label ingestion; never target a shared, staging, or production database.
 
-CI runs:
+CI and exact-commit release validation run:
 
 ```text
-npm ci -> npm run check -> npm test -> npm run test:integration -> npm run build
+npm ci -> npm run codegen -> npm run lint -> npm run format:check -> npm run check -> npm test -> npm run test:integration -> npm run build
 ```
 
-There is no lint or formatting command. Follow existing style: ESM, NodeNext `.js` import suffixes, single quotes, no semicolons, narrow interfaces, and no unrelated reformatting.
+`npm run lint` also regenerates ignored Lexicon TypeScript through its `prelint` hook, so typed lint works from a fresh checkout. ESLint prohibits inline configuration (including disable comments) globally and bans `@ts-expect-error`, `@ts-ignore`, and `@ts-nocheck` in maintained TypeScript. ESLint excludes generated Lexicons, build output, coverage, dependencies, pinned external Lexicons, and release changelogs. Prettier formats maintained TypeScript, MJS, Markdown, YAML, project configs, and project-owned feed Lexicons; `.prettierignore` excludes generated output, external pinned Lexicons, the lockfile, and release changelogs. SQL, Bruno `.bru`, shell, Dockerfile, and environment files are not formatted by these commands.
+
+Follow existing code style: ESM, NodeNext `.js` import suffixes, single quotes, no semicolons, narrow interfaces, and no unrelated reformatting. Use `npm run format` only for the maintained file set listed above; never format generated or pinned external artifacts.
 
 ## Architecture and ownership
 

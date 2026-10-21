@@ -1,4 +1,4 @@
-import { isValidDid } from '@atproto/syntax'
+import { isValidDid, type DidString } from '@atproto/syntax'
 
 /** Runtime settings for the standalone feed service and its read-only database pool. */
 export interface Config {
@@ -25,7 +25,7 @@ export interface Config {
   /** Maximum time graceful shutdown waits for active requests. */
   readonly gracefulShutdownMs: number
   /** DID of this service; required as the service-auth JWT audience. */
-  readonly serviceDid: string
+  readonly serviceDid: DidString
   /** Maximum accepted age of a service-auth JWT, in seconds. */
   readonly serviceAuthMaxAgeSeconds: number
   /** Maximum time allowed for one DID document resolution. */
@@ -45,7 +45,7 @@ const parseIntegerEnv = (
   const parsed = Number(raw)
   if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
     throw new Error(
-      `${name} must be an integer from ${minimum} through ${maximum}; change ${name} from ${JSON.stringify(raw)} to a value in that range.`,
+      `${name} must be an integer from ${String(minimum)} through ${String(maximum)}; change ${name} from ${JSON.stringify(raw)} to a value in that range.`,
     )
   }
   return parsed
@@ -79,7 +79,7 @@ const optionalIntegerEnv = (
 /** Loads and validates process environment values before any listener or pool is started. */
 export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
   const databaseUrl = env.DATABASE_URL
-  if (!databaseUrl) {
+  if (databaseUrl === undefined || databaseUrl === '') {
     throw new Error(
       'DATABASE_URL is required; set it to the dedicated read-only Postgres connection URL for the HappyView database.',
     )
@@ -100,7 +100,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
   }
 
   const serviceDid = env.SERVICE_DID
-  if (!serviceDid) {
+  if (serviceDid === undefined || serviceDid === '') {
     throw new Error(
       'SERVICE_DID is required; set it to the valid DID identifying this service for service-auth JWT audience verification.',
     )
@@ -119,8 +119,10 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
         .filter(Boolean),
     ),
   ]
-  const invalidLabeler = trustedQualityLabelerDids.find((did) => !isValidDid(did))
-  if (invalidLabeler) {
+  const invalidLabeler = trustedQualityLabelerDids.find(
+    (did) => !isValidDid(did),
+  )
+  if (invalidLabeler !== undefined) {
     throw new Error(
       `TRUSTED_QUALITY_LABELER_DIDS contains invalid DID ${JSON.stringify(invalidLabeler)}; use a comma-separated list of valid DIDs.`,
     )
@@ -135,7 +137,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
   }
 
   return {
-    host: env.HOST || '0.0.0.0',
+    host: env.HOST === undefined || env.HOST === '' ? '0.0.0.0' : env.HOST,
     port,
     serviceDid,
     serviceAuthMaxAgeSeconds: integerEnv(
@@ -152,7 +154,10 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
       100,
       60_000,
     ),
-    metricsHost: env.METRICS_HOST || '0.0.0.0',
+    metricsHost:
+      env.METRICS_HOST === undefined || env.METRICS_HOST === ''
+        ? '0.0.0.0'
+        : env.METRICS_HOST,
     metricsPort,
     databaseUrl,
     databaseMaxConnections: integerEnv(
@@ -198,6 +203,9 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
       120_000,
     ),
     trustedQualityLabelerDids,
-    logLevel: env.LOG_LEVEL || 'info',
+    logLevel:
+      env.LOG_LEVEL === undefined || env.LOG_LEVEL === ''
+        ? 'info'
+        : env.LOG_LEVEL,
   }
 }

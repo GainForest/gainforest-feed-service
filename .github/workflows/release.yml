@@ -140,6 +140,18 @@ jobs:
       - name: Build required native dependencies
         run: npm rebuild esbuild
 
+      - name: Generate Lexicon TypeScript
+        run: npm run codegen
+
+      - name: Check lint configuration guards
+        run: npm run lint:config
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
       - name: Type-check
         run: npm run check
 

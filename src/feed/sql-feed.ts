@@ -20,22 +20,23 @@ export interface NormalizedPageParams {
   readonly cursor?: string
 }
 
-export interface SqlFeedQueryExecutor {
-  query<Row extends QueryResultRow>(
+export interface SqlFeedQueryExecutor<Row extends QueryResultRow> {
+  query(
     text: string,
     values?: readonly unknown[],
   ): Promise<{ readonly rows: readonly Row[] }>
 }
 
-export interface SqlFeedRuntime {
-  readonly database: SqlFeedQueryExecutor
+export interface SqlFeedRuntime<Row extends QueryResultRow> {
+  readonly database: SqlFeedQueryExecutor<Row>
   readonly metrics: Metrics
 }
 
-export type FeedRowMapper<
-  DatabaseRow,
-  FeedRow extends InternalFeedRow,
-> = (
+const hasSourceValue = <Row extends InternalFeedRow>(
+  row: Row | (Row & InternalSourceFeedRow),
+): row is Row & InternalSourceFeedRow => Object.hasOwn(row, 'sourceValue')
+
+export type FeedRowMapper<DatabaseRow, FeedRow extends InternalFeedRow> = (
   row: DatabaseRow,
   mode: FeedPageMode,
 ) => FeedRow | (FeedRow & InternalSourceFeedRow)
@@ -74,7 +75,7 @@ export const defineSqlFeed = <
   DatabaseRow extends QueryResultRow,
   FeedRow extends InternalFeedRow,
 >(
-  runtime: SqlFeedRuntime,
+  runtime: SqlFeedRuntime<DatabaseRow>,
   definition: SqlFeedDefinition<
     Params,
     Normalized,
@@ -90,7 +91,7 @@ export const defineSqlFeed = <
   ): InternalFeedPage<Row> => {
     if (rows.length > fetchLimit) {
       throw new Error(
-        `Feed query for ${definition.id} returned ${rows.length} rows after requesting at most ${fetchLimit}; apply the registered limit inside the SQL statement.`,
+        `Feed query for ${definition.id} returned ${String(rows.length)} rows after requesting at most ${String(fetchLimit)}; apply the registered limit inside the SQL statement.`,
       )
     }
 
@@ -103,11 +104,7 @@ export const defineSqlFeed = <
       rows: page,
       ...(hasNext && last
         ? {
-            cursor: encodeCursor(
-              definition.id,
-              last,
-              definition.cursor,
-            ),
+            cursor: encodeCursor(definition.id, last, definition.cursor),
           }
         : {}),
     }
@@ -159,10 +156,7 @@ export const defineSqlFeed = <
     const startedAt = performance.now()
     let result: { readonly rows: readonly DatabaseRow[] }
     try {
-      result = await runtime.database.query<DatabaseRow>(
-        definition.sql,
-        values,
-      )
+      result = await runtime.database.query(definition.sql, values)
     } finally {
       runtime.metrics.observeDatabase(
         'feed',
@@ -171,20 +165,18 @@ export const defineSqlFeed = <
     }
 
     if (mode === 'metadata') {
-      const rows = result.rows.map((row) =>
-        definition.mapRow(row, 'metadata'),
-      )
+      const rows = result.rows.map((row) => definition.mapRow(row, 'metadata'))
       return finishPage(rows, normalized, fetchLimit)
     }
 
     const rows = result.rows.map((row) => {
       const mapped = definition.mapRow(row, 'with-source')
-      if (!Object.prototype.hasOwnProperty.call(mapped, 'sourceValue')) {
+      if (!hasSourceValue(mapped)) {
         throw new Error(
           `Feed row mapper for ${definition.id} returned metadata without sourceValue in with-source mode; return the exact selected source or reject the row.`,
         )
       }
-      return mapped as FeedRow & InternalSourceFeedRow
+      return mapped
     })
     return finishPage(rows, normalized, fetchLimit)
   }

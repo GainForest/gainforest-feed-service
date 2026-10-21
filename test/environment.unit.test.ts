@@ -19,8 +19,9 @@ const createEnvFile = (value: string): string => {
 }
 
 afterEach(() => {
-  if (originalValue === undefined) delete process.env[variableName]
-  else process.env[variableName] = originalValue
+  if (originalValue === undefined) {
+    Reflect.deleteProperty(process.env, variableName)
+  } else process.env[variableName] = originalValue
   for (const directory of directories.splice(0)) {
     rmSync(directory, { recursive: true, force: true })
   }
@@ -28,7 +29,7 @@ afterEach(() => {
 
 describe('loadLocalEnvironment', () => {
   it('loads a local env file', () => {
-    delete process.env[variableName]
+    Reflect.deleteProperty(process.env, variableName)
 
     loadLocalEnvironment(createEnvFile('from-file'))
 

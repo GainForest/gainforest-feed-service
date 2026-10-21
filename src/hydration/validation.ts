@@ -1,10 +1,4 @@
-import {
-  graphemeLen,
-  isBlobRef,
-  jsonToLex as jsonToProtocolLex,
-  utf8Len,
-  type BlobRef,
-} from '@atproto/lex'
+import { isBlobRef, lexParse, type BlobRef } from '@atproto/lex'
 import { jsonToLex as jsonToLegacyLex } from '@atproto/lexicon'
 import {
   AppCertifiedActorProfile,
@@ -38,10 +32,7 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 export const toProtocolBlobRef = (blob: unknown): BlobRef | undefined => {
   try {
     if (isBlobRef(blob)) return blob
-    const json = JSON.parse(JSON.stringify(blob)) as Parameters<
-      typeof jsonToProtocolLex
-    >[0]
-    const parsed = jsonToProtocolLex(json, { strict: true })
+    const parsed = lexParse(JSON.stringify(blob), { strict: true })
     return isBlobRef(parsed) ? parsed : undefined
   } catch {
     return undefined
@@ -99,7 +90,7 @@ export const validateCertifiedProfile = (
   try {
     // The generated validator requires its own BlobRef class, so the parser and
     // @hypercerts-org/lexicon must resolve the same @atproto/lexicon version.
-    const indexedJson = value as Parameters<typeof jsonToLegacyLex>[0]
+    const indexedJson = value
     const result = AppCertifiedActorProfile.validateRecord(
       jsonToLegacyLex(indexedJson),
     )
@@ -116,14 +107,12 @@ export const validateCertifiedProfile = (
 export const isMeaningfulCertifiedProfile = (
   profile: ValidatedCertifiedProfile,
 ): boolean =>
-  Boolean(
-    profile.displayName ||
-      profile.description ||
-      profile.avatar ||
-      profile.banner ||
-      profile.pronouns ||
-      profile.website,
-  )
+  (profile.displayName !== undefined && profile.displayName !== '') ||
+  (profile.description !== undefined && profile.description !== '') ||
+  profile.avatar !== undefined ||
+  profile.banner !== undefined ||
+  (profile.pronouns !== undefined && profile.pronouns !== '') ||
+  (profile.website !== undefined && profile.website !== '')
 
 export type ValidatedFeedRecord =
   | {
@@ -173,10 +162,7 @@ const hasAccountSubject = (value: AppCertifiedBadgeAward.Record): boolean =>
 
 type ValidatedFeedRecordFor<
   Collection extends ValidatedFeedRecord['collection'],
-> = Extract<
-  ValidatedFeedRecord,
-  { readonly collection: Collection }
->
+> = Extract<ValidatedFeedRecord, { readonly collection: Collection }>
 
 const validateActivityRecord = (
   kind: FeedKind,
@@ -209,10 +195,7 @@ const validateCollectionRecord = (
   rawValue: unknown,
   parsedValue: unknown,
 ): ValidatedFeedRecordFor<'org.hypercerts.collection'> | undefined => {
-  if (
-    kind !== 'collection.create' &&
-    kind !== 'project.created_with_cert'
-  ) {
+  if (kind !== 'collection.create' && kind !== 'project.created_with_cert') {
     return undefined
   }
 
@@ -329,9 +312,7 @@ export const validateFeedRecord = (
   if (!hasRecordType(value, collection)) return undefined
 
   try {
-    const parsedValue = jsonToLegacyLex(
-      value as Parameters<typeof jsonToLegacyLex>[0],
-    )
+    const parsedValue = jsonToLegacyLex(value)
     switch (collection) {
       case 'org.hypercerts.claim.activity':
         return validateActivityRecord(kind, value, parsedValue)

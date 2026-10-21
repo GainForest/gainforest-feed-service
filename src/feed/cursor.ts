@@ -1,10 +1,13 @@
-import { isDatetimeString, isValidAtUri } from '@atproto/syntax'
+import { isAtUriString, isDatetimeString } from '@atproto/syntax'
 
 import { FeedError, FeedErrorCode } from './errors.js'
 
 const CURSOR_VERSION = 1
 const MAX_CURSOR_LENGTH = 4096
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
 
 /** Feed-owned conversion between an opaque cursor position and one selected row. */
 export interface CursorCodec<Cursor, Row> {
@@ -30,23 +33,21 @@ export const timestampUriCursor: CursorCodec<
   { readonly uri: string; readonly sortValue: string }
 > = {
   decode(value) {
-    if (
-      typeof value !== 'object' ||
-      value === null ||
-      Array.isArray(value) ||
-      Object.keys(value).length !== 2
-    ) {
+    if (!isRecord(value) || Object.keys(value).length !== 2) {
       throw invalidPosition('cursor position has the wrong shape')
     }
 
-    const position = value as Record<string, unknown>
+    const position = value
     if (
       typeof position.value !== 'string' ||
       !isDatetimeString(position.value)
     ) {
       throw invalidPosition('cursor value must be a valid RFC3339 timestamp')
     }
-    if (typeof position.uri !== 'string' || !isValidAtUri(position.uri)) {
+    if (
+      typeof position.uri !== 'string' ||
+      !isAtUriString(position.uri, { strict: false })
+    ) {
       throw invalidPosition('cursor uri must be a valid AT-URI')
     }
 
@@ -80,7 +81,7 @@ export const decodeCursor = <Cursor, Row>(
   if (cursor.length > MAX_CURSOR_LENGTH) {
     throw new FeedError(
       FeedErrorCode.InvalidCursor,
-      `cursor exceeds the maximum encoded length of ${MAX_CURSOR_LENGTH} characters; discard it and request the first page again.`,
+      `cursor exceeds the maximum encoded length of ${String(MAX_CURSOR_LENGTH)} characters; discard it and request the first page again.`,
     )
   }
   if (!BASE64URL_PATTERN.test(cursor)) {
@@ -102,20 +103,15 @@ export const decodeCursor = <Cursor, Row>(
     )
   }
 
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    Array.isArray(value) ||
-    Object.keys(value).length !== 3
-  ) {
+  if (!isRecord(value) || Object.keys(value).length !== 3) {
     throw invalidPosition('cursor payload has the wrong shape')
   }
 
-  const payload = value as Record<string, unknown>
+  const payload = value
   if (payload.version !== CURSOR_VERSION) {
     throw new FeedError(
       FeedErrorCode.InvalidCursor,
-      `cursor version must be ${CURSOR_VERSION}; discard this unsupported cursor and request the first page again.`,
+      `cursor version must be ${String(CURSOR_VERSION)}; discard this unsupported cursor and request the first page again.`,
     )
   }
   if (payload.feedId !== feedId) {

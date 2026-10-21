@@ -1,8 +1,5 @@
 import type { FeedPageLoader } from './registry.js'
-import type {
-  GetFeedSkeletonInput,
-  GetFeedSkeletonOutput,
-} from './types.js'
+import type { GetFeedSkeletonInput, GetFeedSkeletonOutput } from './types.js'
 
 /** Application boundary consumed by the skeleton XRPC transport. */
 export interface FeedSkeletonReader {

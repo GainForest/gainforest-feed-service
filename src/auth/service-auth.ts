@@ -8,8 +8,6 @@ import {
 } from '@atproto/lex-server'
 import { createDidResolver } from '@atproto-labs/did-resolver'
 import { safeFetchWrap } from '@atproto-labs/fetch-node'
-import type { DidString } from '@atproto/syntax'
-
 import type { Config } from '../config.js'
 
 export type OptionalServiceAuth = LexRouterAuth<
@@ -31,17 +29,15 @@ const replayChallenge = {
 const textEncoder = new TextEncoder()
 
 const expiredTokenError = (): LexServerAuthError =>
-  new LexServerAuthError(
-    'AuthenticationRequired',
-    'JWT token expired',
-    { Bearer: { error: 'JwtExpired' } },
-  )
+  new LexServerAuthError('AuthenticationRequired', 'JWT token expired', {
+    Bearer: { error: 'JwtExpired' },
+  })
 
 type VerifiedServiceAuthPayload = ServiceAuthCredentials['jwt']['payload'] & {
   readonly jti?: unknown
 }
 
-type ReplayProtector = {
+interface ReplayProtector {
   consume: (issuerDid: string, jti: string, exp: number) => void
 }
 
@@ -218,7 +214,10 @@ export const createOptionalServiceAuth = (
   // The upstream callback checks a non-canonical nonce before signature
   // verification. Keep it side-effect-free; canonical jti state is recorded
   // only after the built-in verifier and the exact endpoint check succeed.
-  const verify = serviceAuth({ ...options, unique: async () => true })
+  const verify = serviceAuth({
+    ...options,
+    unique: () => Promise.resolve(true),
+  })
   const replayProtector = createReplayProtector()
 
   return async (context) => {
@@ -260,7 +259,7 @@ export const createConfiguredServiceAuth = (
   // lex-server currently rejects Proposal 0014 did#serviceId audiences.
   // Keep the bare-DID audience until upstream can accept both forms explicitly.
   return createOptionalServiceAuth({
-    audience: config.serviceDid as DidString,
+    audience: config.serviceDid,
     maxAge: config.serviceAuthMaxAgeSeconds,
     didResolver,
   })

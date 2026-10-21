@@ -5,7 +5,7 @@ import {
   encodeCursor,
   timestampUriCursor,
 } from '../src/feed/cursor.js'
-import { FeedError, FeedErrorCode } from '../src/feed/errors.js'
+import { type FeedError, FeedErrorCode } from '../src/feed/errors.js'
 
 const feedId = 'org.hypercerts.feed.defs#hypercertsFeed'
 const otherFeedId = 'org.hypercerts.feed.defs#otherFeed'
@@ -41,7 +41,7 @@ describe('feed cursor', () => {
 
     expect(() =>
       decodeCursor(otherFeedId, encoded, timestampUriCursor),
-    ).toThrowError(
+    ).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidCursor,
       }),
@@ -61,9 +61,7 @@ describe('feed cursor', () => {
       }),
     ).toString('base64url')
 
-    expect(() =>
-      decodeCursor(feedId, encoded, timestampUriCursor),
-    ).toThrowError(
+    expect(() => decodeCursor(feedId, encoded, timestampUriCursor)).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidCursor,
       }),
@@ -87,9 +85,7 @@ describe('feed cursor', () => {
       JSON.stringify({ version: 1, feedId, value: 'not-a-position' }),
     ).toString('base64url'),
   ])('rejects malformed or unsupported cursor %s', (cursor) => {
-    expect(() =>
-      decodeCursor(feedId, cursor, timestampUriCursor),
-    ).toThrowError(
+    expect(() => decodeCursor(feedId, cursor, timestampUriCursor)).toThrow(
       expect.objectContaining<Partial<FeedError>>({
         code: FeedErrorCode.InvalidCursor,
       }),

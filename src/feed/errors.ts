@@ -7,8 +7,7 @@ export const FeedErrorCode = {
 } as const
 
 /** One stable public error name returned by the generic feed XRPC endpoints. */
-export type FeedErrorCode =
-  (typeof FeedErrorCode)[keyof typeof FeedErrorCode]
+export type FeedErrorCode = (typeof FeedErrorCode)[keyof typeof FeedErrorCode]
 
 /** Expected feed failure that can be safely translated into a public XRPC response. */
 export class FeedError extends Error {

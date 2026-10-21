@@ -6,10 +6,22 @@
       "type": "procedure",
       "description": "Builds an ordered hydrated feed from current indexed records and identities for the registered feed and parameters selected in the request. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer and may omit params.viewerDid; anonymous requests must provide it.",
       "errors": [
-        { "name": "InvalidRequest", "description": "The request or the selected feed's parameters are malformed or semantically invalid." },
-        { "name": "UnsupportedFeed", "description": "The requested feed identifier is not registered by this service." },
-        { "name": "InvalidCursor", "description": "The cursor is invalid or incompatible with the selected feed." },
-        { "name": "InternalError", "description": "The service encountered an internal error." }
+        {
+          "name": "InvalidRequest",
+          "description": "The request or the selected feed's parameters are malformed or semantically invalid."
+        },
+        {
+          "name": "UnsupportedFeed",
+          "description": "The requested feed identifier is not registered by this service."
+        },
+        {
+          "name": "InvalidCursor",
+          "description": "The cursor is invalid or incompatible with the selected feed."
+        },
+        {
+          "name": "InternalError",
+          "description": "The service encountered an internal error."
+        }
       ],
       "input": {
         "encoding": "application/json",

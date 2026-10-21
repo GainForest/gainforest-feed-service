@@ -217,24 +217,24 @@ Source JSON is never returned.
 
 For local development, copy `.env.example` to `.env`. For deployment, copy its values into the deployment's variable configuration. The process can load a local `.env`, but it never replaces variables already set in the environment.
 
-| Variable | Required | Default | Purpose |
-|---|---:|---:|---|
-| `DATABASE_URL` | yes | | Dedicated read-only Postgres URL for the HappyView database |
-| `SERVICE_DID` | yes | | DID identifying this service and required as the service-auth JWT audience |
-| `SERVICE_AUTH_MAX_AGE_SECONDS` | no | `300` | Maximum service-auth JWT age; bounded from 1 through 3600 seconds |
-| `DID_RESOLUTION_TIMEOUT_MS` | no | `2000` | Total timeout for one HTTPS DID-document resolution; bounded from 100 through 60000 ms |
-| `PORT` | no | `3000` | HTTP listen port |
-| `HOST` | no | `0.0.0.0` | Public HTTP listen interface |
-| `METRICS_HOST` | no | `0.0.0.0` | Private metrics listen interface; used only when `METRICS_PORT` is set |
-| `METRICS_PORT` | no | disabled | Enables the private `GET /metrics` listener on this port; must differ from `PORT` |
-| `LOG_LEVEL` | no | `info` | Pino log level |
-| `DATABASE_MAX_CONNECTIONS` | no | `5` | Maximum pool size, capped at 20; the pool keeps one connection warm |
-| `DATABASE_IDLE_TIMEOUT_MS` | no | `60000` | Time before idle connections above the one-connection minimum are closed |
-| `DATABASE_CONNECTION_TIMEOUT_MS` | no | `2000` | Pool acquisition timeout |
-| `DATABASE_STATEMENT_TIMEOUT_MS` | no | `5000` | PostgreSQL statement timeout |
-| `REQUEST_TIMEOUT_MS` | no | `10000` | Maximum time allowed to receive an HTTP request; not a handler or database deadline |
-| `GRACEFUL_SHUTDOWN_MS` | no | `10000` | Shutdown drain timeout |
-| `TRUSTED_QUALITY_LABELER_DIDS` | no | empty | Comma-separated labeler DIDs trusted for current HappyView quality-label rows |
+| Variable                         | Required |   Default | Purpose                                                                                |
+| -------------------------------- | -------: | --------: | -------------------------------------------------------------------------------------- |
+| `DATABASE_URL`                   |      yes |           | Dedicated read-only Postgres URL for the HappyView database                            |
+| `SERVICE_DID`                    |      yes |           | DID identifying this service and required as the service-auth JWT audience             |
+| `SERVICE_AUTH_MAX_AGE_SECONDS`   |       no |     `300` | Maximum service-auth JWT age; bounded from 1 through 3600 seconds                      |
+| `DID_RESOLUTION_TIMEOUT_MS`      |       no |    `2000` | Total timeout for one HTTPS DID-document resolution; bounded from 100 through 60000 ms |
+| `PORT`                           |       no |    `3000` | HTTP listen port                                                                       |
+| `HOST`                           |       no | `0.0.0.0` | Public HTTP listen interface                                                           |
+| `METRICS_HOST`                   |       no | `0.0.0.0` | Private metrics listen interface; used only when `METRICS_PORT` is set                 |
+| `METRICS_PORT`                   |       no |  disabled | Enables the private `GET /metrics` listener on this port; must differ from `PORT`      |
+| `LOG_LEVEL`                      |       no |    `info` | Pino log level                                                                         |
+| `DATABASE_MAX_CONNECTIONS`       |       no |       `5` | Maximum pool size, capped at 20; the pool keeps one connection warm                    |
+| `DATABASE_IDLE_TIMEOUT_MS`       |       no |   `60000` | Time before idle connections above the one-connection minimum are closed               |
+| `DATABASE_CONNECTION_TIMEOUT_MS` |       no |    `2000` | Pool acquisition timeout                                                               |
+| `DATABASE_STATEMENT_TIMEOUT_MS`  |       no |    `5000` | PostgreSQL statement timeout                                                           |
+| `REQUEST_TIMEOUT_MS`             |       no |   `10000` | Maximum time allowed to receive an HTTP request; not a handler or database deadline    |
+| `GRACEFUL_SHUTDOWN_MS`           |       no |   `10000` | Shutdown drain timeout                                                                 |
+| `TRUSTED_QUALITY_LABELER_DIDS`   |       no |     empty | Comma-separated labeler DIDs trusted for current HappyView quality-label rows          |
 
 For example, set `SERVICE_DID=did:web:dev.feed.hypercerts.dev` only when `https://dev.feed.hypercerts.dev` routes to this service; clients can discover its XRPC endpoint using `did:web:dev.feed.hypercerts.dev#hypercerts_feed`. This service does not publish a signing key: it verifies callers using their own DID documents. The DID service entry is for discovery and does not change JWT audience validation.
 
@@ -269,13 +269,14 @@ You need Node.js 22.19+ and PostgreSQL 16+. The minimum Node.js version matches 
 
 ```bash
 npm install
-npm run codegen
+npm run lint
+npm run format:check
 npm run check
 npm run test:unit
 npm run build
 ```
 
-The committed project Lexicons in `lexicons/` define the public wire contract. `lexicons.json` pins active external Lexicon dependencies by AT-URI and CID; it currently includes `com.atproto.repo.strongRef`. The previously installed `app.bsky.actor.profile.json` file is intentionally preserved but is no longer an active dependency or used for identity hydration. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it. Codegen stages only the standard `org.hypercerts.defs#uri`, `#smallBlob`, `#smallImage`, and `#largeImage` fragments from the pinned `@hypercerts-org/lexicon` package. This keeps the feed from committing duplicate definitions. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
+The committed project Lexicons in `lexicons/` define the public wire contract. `lexicons.json` pins active external Lexicon dependencies by AT-URI and CID; it currently includes `com.atproto.repo.strongRef`. The previously installed `app.bsky.actor.profile.json` file is intentionally preserved but is no longer an active dependency or used for identity hydration. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it; `npm run lint` also does so through its `prelint` hook before typed linting. Codegen stages only the standard `org.hypercerts.defs#uri`, `#smallBlob`, `#smallImage`, and `#largeImage` fragments from the pinned `@hypercerts-org/lexicon` package. This keeps the feed from committing duplicate definitions. `npm run lint:fix` applies ESLint autofixes, and `npm run format` formats maintained TypeScript, MJS, Markdown, YAML, project configuration, and project-owned feed Lexicons. Generated and externally pinned Lexicons, the lockfile, and release changelogs are excluded. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
 
 Check the committed network Lexicons against the manifest with:
 
