@@ -23,7 +23,7 @@ record.record_created_at   timestamptz, nullable   (migration 010)
 record.validation_status   text, not null          (migration 012)
 ```
 
-The canonical migrations are the files in `internal/database/migrations/postgres` in the Hyperindex repository (001 through 015 at the time of writing). The older `db/migrations_postgres` directory stops at migration 004 and is not what Hyperindex applies. The service needs exactly two of them: **migration 010** for `record_created_at` and its timeline indexes, and **migration 012** for `validation_status`. Its queries also rely on `idx_record_did_collection` from migration 001. Later migrations are not required.
+The canonical migrations are the files in `internal/database/migrations/postgres` in the Hyperindex repository (001 through 014 on `main` at the time of writing). The older `db/migrations_postgres` directory stops at migration 004 and is not what Hyperindex applies. The service needs exactly two of them: **migration 010** for `record_created_at` and its timeline indexes, and **migration 012** for `validation_status`. Its queries also rely on `idx_record_did_collection` from migration 001. Later migrations are not required.
 
 The service does not read `actor`, `label`, or any other Hyperindex table, and it does not read handles.
 
