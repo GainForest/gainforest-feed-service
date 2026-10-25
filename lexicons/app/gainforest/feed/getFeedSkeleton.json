@@ -1,10 +1,10 @@
 {
   "lexicon": 1,
-  "id": "org.hypercerts.feed.getFeedSkeleton",
+  "id": "app.gainforest.feed.getFeedSkeleton",
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Builds an ordered feed skeleton from current indexed records for the registered feed and parameters selected in the request. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer and may omit params.viewerDid; anonymous requests must provide it. The caller hydrates returned AT-URIs separately.",
+      "description": "Builds an ordered feed skeleton from the same selection and cursor as app.gainforest.feed.getFeed. Each entry is only an AT-URI. A repost yields the repost record's URI. A burst or an audio day yields the sample URIs it references, newest first, so a page can contain more entries than its limit. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer. Anonymous requests that set params.following must provide params.viewerDid. Omitting params selects the global feed. The caller hydrates returned AT-URIs separately.",
       "errors": [
         {
           "name": "InvalidRequest",
@@ -17,6 +17,10 @@
         {
           "name": "InvalidCursor",
           "description": "The cursor is invalid or incompatible with the selected feed."
+        },
+        {
+          "name": "ScanLimitExceeded",
+          "description": "One account's run of observations or recordings is longer than the service reads, or reading it takes longer than the database statement timeout, so this page cannot be produced. Retrying the same request will not help."
         },
         {
           "name": "InternalError",
@@ -32,20 +36,20 @@
             "feedId": {
               "type": "string",
               "maxLength": 512,
-              "knownValues": ["org.hypercerts.feed.defs#hypercertsFeed"],
+              "knownValues": ["app.gainforest.feed.defs#activityFeed"],
               "description": "Identifier of the feed algorithm to execute."
             },
             "params": {
               "type": "union",
               "closed": false,
-              "refs": ["org.hypercerts.feed.defs#hypercertsFeedParams"],
-              "description": "Algorithm-specific parameters. Omit when the selected feed accepts none."
+              "refs": ["app.gainforest.feed.defs#activityFeedParams"],
+              "description": "Algorithm-specific parameters. Optional for app.gainforest.feed.defs#activityFeed: when omitted, its defaults apply (filter all, following false)."
             },
             "limit": {
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
-              "description": "Maximum number of feed subjects to return. The selected feed determines the default and may enforce a lower maximum."
+              "description": "Maximum number of feed items to select. A burst or an audio day is one item but can contribute up to 20 skeleton entries. The selected feed determines the default and may enforce a lower maximum."
             },
             "cursor": {
               "type": "string",

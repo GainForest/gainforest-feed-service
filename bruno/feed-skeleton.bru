@@ -1,11 +1,11 @@
 meta {
   name: Feed skeleton
   type: http
-  seq: 3
+  seq: 6
 }
 
 post {
-  url: {{baseUrl}}/xrpc/org.hypercerts.feed.getFeedSkeleton
+  url: {{baseUrl}}/xrpc/app.gainforest.feed.getFeedSkeleton
   body: json
   auth: none
 }
@@ -18,8 +18,7 @@ body:json {
   {
     "feedId": "{{feedId}}",
     "params": {
-      "$type": "{{feedParamsType}}",
-      "viewerDid": "{{viewerDid}}"
+      "$type": "{{feedParamsType}}"
     },
     "limit": {{limit}},
     "cursor": "{{cursor}}"

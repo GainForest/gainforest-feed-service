@@ -8,22 +8,21 @@ import { registerGetFeed } from './api/get-feed.js'
 import type { OptionalServiceAuth } from './auth/service-auth.js'
 import type { DatabaseCompatibilityChecker } from './database.js'
 import { FeedErrorCode } from './feed/errors.js'
-import type { FeedSkeletonReader } from './feed/service.js'
-import type { HydratedFeedReader } from './hydration/service.js'
+import type { FeedReader, FeedSkeletonReader } from './feed/service.js'
 import type { Metrics } from './metrics.js'
 
 const MAX_REQUEST_BODY_BYTES = 64 * 1024
 
 const FEED_ROUTES = [
   {
-    path: '/xrpc/org.hypercerts.feed.getFeedSkeleton',
-    nsid: 'org.hypercerts.feed.getFeedSkeleton',
+    path: '/xrpc/app.gainforest.feed.getFeedSkeleton',
+    nsid: 'app.gainforest.feed.getFeedSkeleton',
     label: 'feed_skeleton',
   },
   {
-    path: '/xrpc/org.hypercerts.feed.getFeed',
-    nsid: 'org.hypercerts.feed.getFeed',
-    label: 'feed_hydrated',
+    path: '/xrpc/app.gainforest.feed.getFeed',
+    nsid: 'app.gainforest.feed.getFeed',
+    label: 'feed',
   },
 ] as const
 
@@ -253,8 +252,9 @@ const observeResponseError = async (
 const handleRootRequest = (request: Request): Response =>
   request.method === 'GET'
     ? jsonResponse({
-        name: 'Hypercerts Feed Service',
-        description: 'Read-only Hypercerts feeds over XRPC.',
+        name: 'GainForest Feed Service',
+        description:
+          'Read-only GainForest activity feed over XRPC. Returns references and selection metadata, not records.',
         endpoints: FEED_ROUTES.map((route) => route.path),
       })
     : methodNotAllowed('GET')
@@ -279,8 +279,8 @@ const handleDidDocumentRequest = (
     id: serviceDid,
     service: [
       {
-        id: '#hypercerts_feed',
-        type: 'HypercertsFeedService',
+        id: '#gainforest_feed',
+        type: 'GainForestFeedService',
         serviceEndpoint: `https://${hostname}`,
       },
     ],
@@ -361,7 +361,7 @@ const handleRequest = async (
 /** Public feed services registered at the HTTP composition boundary. */
 export interface AppFeedServices {
   readonly skeleton: FeedSkeletonReader
-  readonly hydrated: HydratedFeedReader
+  readonly feed: FeedReader
 }
 
 /** Builds the fetch-style HTTP application containing XRPC and operational endpoints. */
@@ -383,7 +383,7 @@ export const createApp = (
     },
   })
   registerGetFeedSkeleton(router, services.skeleton, logger, auth)
-  registerGetFeed(router, services.hydrated, logger, auth)
+  registerGetFeed(router, services.feed, logger, auth)
 
   const fetch: FetchHandler = async (request) => {
     const startedAt = performance.now()

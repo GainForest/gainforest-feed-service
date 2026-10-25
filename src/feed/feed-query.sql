@@ -1,484 +1,366 @@
+-- GainForest activity feed over Hyperindex's `record` table.
+--
+-- Parameters
+--   $1 kinds        text[]       active kinds: project, observation, organization, post, repost, audio
+--   $2 following    boolean      limit to accounts $3 follows
+--   $3 viewer       text         viewer DID, used only when $2 is true
+--   $4 cursor_ts    timestamptz  position of the last row the previous page consumed, or null
+--   $5 cursor_uri   text         tie-breaker for $4, or null
+--   $6 fetch_limit  integer      page size + 1; the extra item only proves a next page exists
+--   $7 scan_rows    integer      most rows read from the merged feed order; the caller retries
+--                                with a larger value while `complete` is false
+--   $8 gap_seconds  integer      longest gap between neighbours inside one observation burst
+--   $9 sample_size  integer      most sample URIs a burst or audio day returns
+--
+-- Feed order is record_created_at DESC, uri DESC: Hyperindex's materialized,
+-- RFC3339-validated top-level `createdAt`. Rows with a null value are excluded.
+-- Only `validation_status = 'valid'` rows are selected, matching what
+-- Hyperindex's typed GraphQL collections expose.
+--
+-- Range guard: every read of `record` also requires
+--   record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+-- createdAt is client-declared, so a year-10000 record could not be formatted
+-- as a datetime and a record dated 2099 would sit at the top of the feed for
+-- good. Rows outside the range are ignored until their time arrives. The bounds
+-- are written out in each place, not taken from a CTE: the planner needs to see
+-- them to keep reading the timeline index in order.
+--
+-- Result: one row per item, in feed order, plus the `complete` flag. When the
+-- page has no items the result is a single row whose item columns are null.
 WITH
-timestamp_patterns AS NOT MATERIALIZED (
-  SELECT
-    '^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$'::text AS rfc3339_timestamp_pattern,
-    '-00:00$'::text AS rfc3339_unknown_offset_suffix_pattern,
-    '^[0-9]{4}-[0-9]{2}-[0-9]{2} ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]([.][0-9]+)?[+-]([01][0-9]|2[0-3])(:[0-5][0-9](:[0-5][0-9])?)?$'::text AS postgres_timestamp_pattern,
-    '-00(:00(:00)?)?$'::text AS postgres_unknown_offset_suffix_pattern
+params AS (
+  SELECT COALESCE($4::timestamptz, 'infinity'::timestamptz) AS cursor_ts,
+         COALESCE($5::text, '') AS cursor_uri
 ),
--- =============================================================================
--- Scope resolution
--- Combine the viewer's current Certified follows with valid DID endorsements
--- from trusted evaluators, then apply HappyView's current label projection.
--- =============================================================================
-base_authors AS (
-  SELECT follow_json.value->>'subject' AS did
-  FROM happyview_records AS follow
+-- Accounts the viewer currently follows. Only read when $2 is true.
+follows AS (
+  SELECT DISTINCT follow.json->>'subject' AS did
+  FROM record AS follow
+  WHERE $2::boolean
+    AND follow.collection = 'app.certified.graph.follow'
+    AND follow.did = $3::text
+    AND follow.validation_status = 'valid'
+    AND jsonb_typeof(follow.json->'subject') = 'string'
+),
+-- Audio groups follow the GainForest app's upload days. A recording that names
+-- a recorder folder (`deploymentRef` is an AT-URI) belongs to that folder, and
+-- the folder's owner, the account in the AT-URI, owns the group, whoever stored
+-- the recording. A recording without a folder belongs to its own account. A
+-- group is one owner, one folder (or none), and one UTC day. The `audio_key`
+-- lateral subqueries below compute that key and must stay identical.
+--
+-- Audio: the newest $7 recordings below the cursor ...
+audio_scan AS (
+  SELECT r.uri, r.cid, r.record_created_at AS ts, audio_key.owner, audio_key.folder
+  FROM record AS r
+  CROSS JOIN params AS p
   CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN pg_input_is_valid(follow.record, 'jsonb')
-        THEN follow.record::jsonb
-      ELSE NULL::jsonb
-    END AS value
-  ) AS follow_json
-  WHERE follow.collection = 'app.certified.graph.follow'
-    AND follow.did = $1
-    AND jsonb_typeof(follow_json.value->'subject') = 'string'
-    -- Bound untrusted values and require the conservative DID shape accepted by
-    -- this service before allowing them to expand the feed scope.
-    AND char_length(follow_json.value->>'subject') <= 2048
-    AND follow_json.value->>'subject' ~ '^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$'
+    SELECT CASE WHEN r.json->>'deploymentRef' LIKE 'at://%' THEN r.json->>'deploymentRef' END AS folder,
+           CASE WHEN r.json->>'deploymentRef' LIKE 'at://did:%'
+                THEN substring(r.json->>'deploymentRef' from '^at://([^/]+)')
+                ELSE r.did
+           END AS owner
+  ) AS audio_key
+  WHERE 'audio' = ANY($1::text[])
+    AND r.collection = 'app.gainforest.ac.audio'
+    AND r.record_created_at IS NOT NULL
+    AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+    AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+    AND r.validation_status = 'valid'
+    AND (NOT $2::boolean OR audio_key.owner IN (SELECT did FROM follows))
+  ORDER BY r.record_created_at DESC, r.uri DESC
+  LIMIT $7::integer
 ),
--- This rule is shared by evaluator scope expansion and visible award events.
--- NOT MATERIALIZED lets PostgreSQL push each consumer's DID/URI filters into it.
-valid_endorsement_awards AS NOT MATERIALIZED (
-  SELECT
-    award.*,
-    award_json.value AS record_json,
-    award_json.value->'subject'->>'did' AS endorsement_subject_did
-  FROM happyview_records AS award
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN pg_input_is_valid(award.record, 'jsonb')
-        THEN award.record::jsonb
-      ELSE NULL::jsonb
-    END AS value
-  ) AS award_json
-  JOIN happyview_records AS definition
-    -- Match the exact definition version referenced by the award.
-    ON definition.uri = award_json.value->'badge'->>'uri'
-   AND definition.cid = award_json.value->'badge'->>'cid'
-   AND definition.collection = 'app.certified.badge.definition'
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN pg_input_is_valid(definition.record, 'jsonb')
-        THEN definition.record::jsonb
-      ELSE NULL::jsonb
-    END AS value
-  ) AS definition_json
-  WHERE award.collection = 'app.certified.badge.award'
-    AND definition_json.value->>'badgeType' = 'endorsement'
-    AND (
-      -- Omitting allowedIssuers permits any issuer. When present, it must be an
-      -- array containing this issuer; malformed values deliberately match none.
-      NOT (definition_json.value ? 'allowedIssuers')
-      OR (
-        jsonb_typeof(definition_json.value->'allowedIssuers') = 'array'
-        AND EXISTS (
-          SELECT 1
-          FROM jsonb_array_elements_text(
-            CASE
-              WHEN jsonb_typeof(definition_json.value->'allowedIssuers') = 'array'
-                THEN definition_json.value->'allowedIssuers'
-              ELSE '[]'::jsonb
-            END
-          ) AS issuer(did)
-          WHERE issuer.did = award.did
-        )
-      )
-    )
-    -- Only account-target endorsements affect scope or appear as feed events.
-    AND jsonb_typeof(award_json.value->'subject') = 'object'
-    AND award_json.value->'subject'->>'$type' = 'app.certified.defs#did'
-    AND jsonb_typeof(award_json.value->'subject'->'did') = 'string'
-    AND char_length(award_json.value->'subject'->>'did') <= 2048
-    AND award_json.value->'subject'->>'did' ~ '^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$'
-    -- Self-endorsements neither expand scope nor produce feed events.
-    AND award.did <> award_json.value->'subject'->>'did'
-    AND COALESCE(
-      (
-        SELECT response_json.value->>'response'
-        FROM happyview_records AS response
-        CROSS JOIN timestamp_patterns AS timestamp_pattern
-        CROSS JOIN LATERAL (
-          SELECT CASE
-            WHEN pg_input_is_valid(response.record, 'jsonb')
-              THEN response.record::jsonb
-            ELSE NULL::jsonb
-          END AS value
-        ) AS response_json
-        CROSS JOIN LATERAL (
-          SELECT CASE
-            WHEN (
-              response.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
-              OR response.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
-            )
-              AND response.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
-              AND pg_input_is_valid(response.indexed_at, 'timestamp with time zone')
-              THEN CASE
-                WHEN isfinite(response.indexed_at::timestamptz)
-                  THEN response.indexed_at::timestamptz
-                ELSE NULL::timestamptz
-              END
-            ELSE NULL::timestamptz
-          END AS value
-        ) AS response_indexed_at
-        CROSS JOIN LATERAL (
-          SELECT COALESCE(
-            CASE
-              WHEN jsonb_typeof(response_json.value->'createdAt') = 'string'
-                AND response_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
-                AND response_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
-                AND pg_input_is_valid(
-                  response_json.value->>'createdAt',
-                  'timestamp with time zone'
-                )
-                THEN (response_json.value->>'createdAt')::timestamptz
-              ELSE NULL::timestamptz
-            END,
-            response_indexed_at.value
-          ) AS effective_at
-        ) AS response_time
-        WHERE response.collection = 'app.certified.badge.response'
-          AND response.did = award_json.value->'subject'->>'did'
-          AND response_json.value->'badgeAward'->>'uri' = award.uri
-          AND response_json.value->'badgeAward'->>'cid' = award.cid
-          AND response_json.value->>'response' IS NOT NULL
-          AND response_json.value->>'response' <> ''
-          AND response_time.effective_at IS NOT NULL
-        -- Compare validated timestamp values, never the stored text lexically.
-        ORDER BY
-          response_time.effective_at DESC,
-          response_indexed_at.value DESC NULLS LAST,
-          response.uri DESC
-        LIMIT 1
-      ),
-      ''
-    ) <> 'rejected'
-),
-evaluator_endorsements AS (
-  SELECT award.endorsement_subject_did AS did
-  FROM valid_endorsement_awards AS award
-  WHERE award.did = ANY($2::text[])
-),
-requested_scope AS (
-  SELECT DISTINCT candidate.did
+-- ... reduced to one head per group: the newest recording of that group. Only
+-- the head enters the feed order, so the rest of a group never appears on a
+-- later page. A group whose head sits at or above the cursor was emitted by an
+-- earlier page and is skipped. Only a group on the cursor's own UTC day can
+-- have such a head, so the check runs for those heads only.
+audio_heads AS (
+  SELECT head.uri, head.cid, head.ts, head.owner, head.folder
   FROM (
-    SELECT did FROM base_authors
-    UNION ALL
-    SELECT did FROM evaluator_endorsements
-  ) AS candidate
-  WHERE candidate.did IS NOT NULL
-    AND candidate.did <> $1
-),
--- HappyView stores only the current positive label projection. Its timestamps
--- are TEXT; validate their shape and finiteness before any timestamp cast.
-active_quality_labels AS (
-  SELECT scoped.did, label.val
-  FROM requested_scope AS scoped
-  JOIN happyview_labels AS label
-    ON label.uri = scoped.did
-  CROSS JOIN timestamp_patterns AS timestamp_pattern
-  WHERE label.src = ANY($6::text[])
-    AND label.val = ANY(
-      ARRAY['high-quality', 'standard', 'draft', 'likely-test']::text[]
-    )
+    SELECT scan.*,
+           row_number() OVER (
+             PARTITION BY scan.owner, scan.folder, (scan.ts AT TIME ZONE 'UTC')::date
+             ORDER BY scan.ts DESC, scan.uri DESC
+           ) AS position_in_group
+    FROM audio_scan AS scan
+  ) AS head
+  CROSS JOIN params AS p
+  WHERE head.position_in_group = 1
     AND CASE
-      WHEN (
-        label.cts ~ timestamp_pattern.rfc3339_timestamp_pattern
-        OR label.cts ~ timestamp_pattern.postgres_timestamp_pattern
-      )
-        AND label.cts !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
-        AND pg_input_is_valid(label.cts, 'timestamp with time zone')
-        THEN isfinite(label.cts::timestamptz)
-      ELSE false
-    END
-    AND CASE
-      WHEN label.exp IS NULL THEN true
-      WHEN (
-        label.exp ~ timestamp_pattern.rfc3339_timestamp_pattern
-        OR label.exp ~ timestamp_pattern.postgres_timestamp_pattern
-      )
-        AND label.exp !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
-        AND pg_input_is_valid(label.exp, 'timestamp with time zone')
-        THEN isfinite(label.exp::timestamptz)
-          AND label.exp::timestamptz > NOW()
-      ELSE false
+      WHEN (head.ts AT TIME ZONE 'UTC')::date = (p.cursor_ts AT TIME ZONE 'UTC')::date
+        THEN NOT EXISTS (
+          SELECT 1
+          FROM record AS emitted
+          CROSS JOIN LATERAL (
+            SELECT CASE WHEN emitted.json->>'deploymentRef' LIKE 'at://%' THEN emitted.json->>'deploymentRef' END AS folder,
+                   CASE WHEN emitted.json->>'deploymentRef' LIKE 'at://did:%'
+                        THEN substring(emitted.json->>'deploymentRef' from '^at://([^/]+)')
+                        ELSE emitted.did
+                   END AS owner
+          ) AS audio_key
+          WHERE emitted.collection = 'app.gainforest.ac.audio'
+            AND emitted.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+            AND (emitted.record_created_at, emitted.uri) >= (p.cursor_ts, p.cursor_uri)
+            AND emitted.record_created_at < (date_trunc('day', head.ts AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
+            AND emitted.validation_status = 'valid'
+            AND audio_key.owner = head.owner
+            AND audio_key.folder IS NOT DISTINCT FROM head.folder
+        )
+      ELSE true
     END
 ),
-quality_summary AS (
-  SELECT
-    quality.did,
-    bool_or(quality.val = ANY($4::text[])) AS has_allowed
-  FROM active_quality_labels AS quality
-  GROUP BY quality.did
+-- The oldest recording the audio scan read, when it stopped at its row limit.
+audio_horizon AS (
+  SELECT oldest.ts, oldest.uri
+  FROM (SELECT count(*) AS scanned FROM audio_scan) AS size
+  CROSS JOIN LATERAL (
+    SELECT scan.ts, scan.uri
+    FROM audio_scan AS scan
+    ORDER BY scan.ts ASC, scan.uri ASC
+    LIMIT 1
+  ) AS oldest
+  WHERE size.scanned >= $7::integer
 ),
-final_scope AS (
-  SELECT scoped.did
-  FROM requested_scope AS scoped
-  LEFT JOIN quality_summary AS quality ON quality.did = scoped.did
-  WHERE NOT $3::boolean
-     OR NOT EXISTS (
-       SELECT 1
-       FROM happyview_records AS organization
-       WHERE organization.uri =
-         'at://' || scoped.did || '/app.certified.actor.organization/self'
-         AND organization.collection = 'app.certified.actor.organization'
+-- Every kind contributes its newest rows in feed order. A kind that is never
+-- part of a burst needs at most $6 rows, because each of its rows is a feed
+-- item on its own. Observations can form long bursts, so they are read up to
+-- $7 rows.
+branches AS (
+  (SELECT 'project'::text AS kind, r.uri, r.cid, r.did, r.record_created_at AS ts,
+          NULL::text AS subject, NULL::text AS deployment, true AS burstable
+   FROM record AS r, params AS p
+   WHERE 'project' = ANY($1::text[])
+     AND r.collection = 'org.hypercerts.collection'
+     AND r.record_created_at IS NOT NULL
+     AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND r.validation_status = 'valid'
+     AND r.json->>'type' IN ('project', 'Project')
+     AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
+   ORDER BY r.record_created_at DESC, r.uri DESC
+   LIMIT $6::integer)
+  UNION ALL
+  (SELECT 'organization', r.uri, r.cid, r.did, r.record_created_at, NULL, NULL, true
+   FROM record AS r, params AS p
+   WHERE 'organization' = ANY($1::text[])
+     AND r.collection = 'app.certified.actor.organization'
+     AND r.record_created_at IS NOT NULL
+     AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND r.validation_status = 'valid'
+     AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
+   ORDER BY r.record_created_at DESC, r.uri DESC
+   LIMIT $6::integer)
+  UNION ALL
+  -- Top-level posts only; replies are comments. Event announcements are not
+  -- activity either.
+  (SELECT 'post', r.uri, r.cid, r.did, r.record_created_at, NULL, NULL, true
+   FROM record AS r, params AS p
+   WHERE 'post' = ANY($1::text[])
+     AND r.collection = 'app.gainforest.feed.post'
+     AND r.record_created_at IS NOT NULL
+     AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND r.validation_status = 'valid'
+     AND r.json->>'reply' IS NULL
+     AND NOT COALESCE(
+       jsonb_typeof(r.json->'tags') = 'array' AND r.json->'tags' ? 'community-event',
+       false
      )
-     OR COALESCE(quality.has_allowed, false)
-     OR (quality.did IS NULL AND $5::boolean)
-),
--- Materialize the complete resolved scope once for project and event selection.
-resolved_scope AS MATERIALIZED (
-  SELECT scoped.did
-  FROM final_scope AS scoped
-),
--- =============================================================================
--- Project pairing
--- A collection and its referenced activity become one project-created event
--- when the records belong to the same actor and effective times are close.
--- =============================================================================
-project_pairs AS (
-  SELECT DISTINCT collection_record.uri AS collection_uri, activity.uri AS activity_uri
-  FROM resolved_scope AS scoped
-  JOIN happyview_records AS collection_record
-    ON collection_record.did = scoped.did
-   AND collection_record.collection = 'org.hypercerts.collection'
-  CROSS JOIN timestamp_patterns AS timestamp_pattern
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN pg_input_is_valid(collection_record.record, 'jsonb')
-        THEN collection_record.record::jsonb
-      ELSE NULL::jsonb
-    END AS value
-  ) AS collection_json
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN (
-        collection_record.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
-        OR collection_record.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
-      )
-        AND collection_record.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
-        AND pg_input_is_valid(collection_record.indexed_at, 'timestamp with time zone')
-        THEN CASE
-          WHEN isfinite(collection_record.indexed_at::timestamptz)
-            THEN collection_record.indexed_at::timestamptz
-          ELSE NULL::timestamptz
-        END
-      ELSE NULL::timestamptz
-    END AS value
-  ) AS collection_indexed_at
-  CROSS JOIN LATERAL (
-    SELECT COALESCE(
-      CASE
-        WHEN jsonb_typeof(collection_json.value->'createdAt') = 'string'
-          AND collection_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
-          AND collection_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
-          AND pg_input_is_valid(
-            collection_json.value->>'createdAt',
-            'timestamp with time zone'
+     AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
+   ORDER BY r.record_created_at DESC, r.uri DESC
+   LIMIT $6::integer)
+  UNION ALL
+  -- A repost counts only while its subject still exists and would itself be a
+  -- feed record: a valid project (type project or Project), observation, or
+  -- top-level non-event post, owned by another account. The row is the
+  -- reposter's.
+  (SELECT 'repost', r.uri, r.cid, r.did, r.record_created_at, r.json->'subject'->>'uri', NULL, true
+   FROM record AS r, params AS p
+   WHERE 'repost' = ANY($1::text[])
+     AND r.collection = 'app.gainforest.feed.repost'
+     AND r.record_created_at IS NOT NULL
+     AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND r.validation_status = 'valid'
+     AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
+     AND EXISTS (
+       SELECT 1
+       FROM record AS subject
+       WHERE subject.uri = r.json->'subject'->>'uri'
+         AND subject.did <> r.did
+         AND subject.validation_status = 'valid'
+         AND (
+           subject.collection = 'app.gainforest.dwc.occurrence'
+           OR (
+             subject.collection = 'org.hypercerts.collection'
+             AND subject.json->>'type' IN ('project', 'Project')
+           )
+           OR (
+             subject.collection = 'app.gainforest.feed.post'
+             AND subject.json->>'reply' IS NULL
+             AND NOT COALESCE(
+               jsonb_typeof(subject.json->'tags') = 'array' AND subject.json->'tags' ? 'community-event',
+               false
+             )
+           )
+         )
+     )
+   ORDER BY r.record_created_at DESC, r.uri DESC
+   LIMIT $6::integer)
+  UNION ALL
+  (SELECT 'audio', head.uri, head.cid, head.owner, head.ts, NULL, head.folder, false
+   FROM audio_heads AS head
+   ORDER BY head.ts DESC, head.uri DESC
+   LIMIT $6::integer)
+  UNION ALL
+  -- An observation with a valid bioacoustic sidecar is shown on its own, with
+  -- its spectrogram, so it never joins a burst.
+  (SELECT 'observation', r.uri, r.cid, r.did, r.record_created_at, NULL, NULL,
+          NOT COALESCE(
+            sidecar.segment IS NOT NULL
+            AND jsonb_typeof(sidecar.segment) = 'object'
+            AND sidecar.segment->'version' = '1'::jsonb
+            AND jsonb_typeof(sidecar.segment->'sourceAudioUri') = 'string'
+            AND sidecar.segment->>'labelCategory' IN ('bird', 'frog', 'insect', 'other', 'note')
+            AND jsonb_typeof(sidecar.segment->'startTimeSeconds') = 'number'
+            AND jsonb_typeof(sidecar.segment->'endTimeSeconds') = 'number'
+            AND jsonb_typeof(sidecar.segment->'minFrequencyHz') = 'number'
+            AND jsonb_typeof(sidecar.segment->'maxFrequencyHz') = 'number'
+            AND sidecar.segment->>'sourceAudioUri' = ANY(
+              ARRAY(SELECT btrim(media) FROM unnest(string_to_array(r.json->>'associatedMedia', '|')) AS media)
+            ),
+            false
           )
-          THEN (collection_json.value->>'createdAt')::timestamptz
-        ELSE NULL::timestamptz
-      END,
-      collection_indexed_at.value
-    ) AS effective_at
-  ) AS collection_time
-  CROSS JOIN LATERAL jsonb_array_elements(
-    CASE
-      WHEN jsonb_typeof(collection_json.value->'items') = 'array'
-        THEN collection_json.value->'items'
-      ELSE '[]'::jsonb
-    END
-  ) AS item
-  JOIN happyview_records AS activity
-    ON activity.uri = item->'itemIdentifier'->>'uri'
-   AND activity.cid = item->'itemIdentifier'->>'cid'
-   AND activity.collection = 'org.hypercerts.claim.activity'
-   AND activity.did = collection_record.did
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN pg_input_is_valid(activity.record, 'jsonb')
-        THEN activity.record::jsonb
-      ELSE NULL::jsonb
-    END AS value
-  ) AS activity_json
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN (
-        activity.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
-        OR activity.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
-      )
-        AND activity.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
-        AND pg_input_is_valid(activity.indexed_at, 'timestamp with time zone')
-        THEN CASE
-          WHEN isfinite(activity.indexed_at::timestamptz)
-            THEN activity.indexed_at::timestamptz
-          ELSE NULL::timestamptz
-        END
-      ELSE NULL::timestamptz
-    END AS value
-  ) AS activity_indexed_at
-  CROSS JOIN LATERAL (
-    SELECT COALESCE(
-      CASE
-        WHEN jsonb_typeof(activity_json.value->'createdAt') = 'string'
-          AND activity_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
-          AND activity_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
-          AND pg_input_is_valid(
-            activity_json.value->>'createdAt',
-            'timestamp with time zone'
-          )
-          THEN (activity_json.value->>'createdAt')::timestamptz
-        ELSE NULL::timestamptz
-      END,
-      activity_indexed_at.value
-    ) AS effective_at
-  ) AS activity_time
-  WHERE collection_json.value IS NOT NULL
-    AND activity_json.value IS NOT NULL
-    AND collection_time.effective_at IS NOT NULL
-    AND activity_time.effective_at IS NOT NULL
-    AND ABS(EXTRACT(EPOCH FROM (
-      activity_time.effective_at - collection_time.effective_at
-    ))) < 60
+   FROM record AS r
+   CROSS JOIN params AS p
+   CROSS JOIN LATERAL (
+     SELECT CASE
+       WHEN jsonb_typeof(r.json->'dynamicProperties') = 'string'
+        AND r.json->>'dynamicProperties' LIKE '%gainforestBioacoustics%'
+        AND pg_input_is_valid(r.json->>'dynamicProperties', 'jsonb')
+         THEN (r.json->>'dynamicProperties')::jsonb->'gainforestBioacoustics'
+     END AS segment
+   ) AS sidecar
+   WHERE 'observation' = ANY($1::text[])
+     AND r.collection = 'app.gainforest.dwc.occurrence'
+     AND r.record_created_at IS NOT NULL
+     AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND r.validation_status = 'valid'
+     AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
+   ORDER BY r.record_created_at DESC, r.uri DESC
+   LIMIT $7::integer)
 ),
-paired_collections AS (
-  SELECT DISTINCT collection_uri AS uri FROM project_pairs
+-- The merged feed order, cut at $7 rows.
+stream AS (
+  SELECT * FROM branches ORDER BY ts DESC, uri DESC LIMIT $7::integer
 ),
-paired_activities AS (
-  SELECT DISTINCT activity_uri AS uri FROM project_pairs
+-- A row continues the previous row's burst when both are burstable
+-- observations by the same account, adjacent in this merged order, and no
+-- more than $8 seconds apart. Any other row, including another kind or another
+-- account's observation, starts a new item.
+flagged AS (
+  SELECT s.*,
+         COALESCE(
+           s.kind = 'observation' AND s.burstable
+           AND lag(s.kind) OVER feed_order = 'observation'
+           AND lag(s.burstable) OVER feed_order
+           AND lag(s.did) OVER feed_order = s.did
+           AND lag(s.ts) OVER feed_order - s.ts <= make_interval(secs => $8::integer),
+           false
+         ) AS continues_run
+  FROM stream AS s
+  WINDOW feed_order AS (ORDER BY s.ts DESC, s.uri DESC)
 ),
--- =============================================================================
--- Record eligibility
--- Select supported records, suppress paired activity duplicates, admit only
--- update attachments, and enforce the shared endorsement policy.
--- =============================================================================
-eligible_records AS (
-  SELECT
-    source.uri,
-    source.cid,
-    source.collection,
-    source.did,
-    source_time.effective_at
-  FROM resolved_scope AS scoped
-  JOIN happyview_records AS source
-    ON source.did = scoped.did
-   AND source.collection = ANY($11::text[])
-  CROSS JOIN timestamp_patterns AS timestamp_pattern
+-- Item number: how many items have started at or before this row.
+numbered AS (
+  SELECT f.*, sum((NOT f.continues_run)::integer) OVER (ORDER BY f.ts DESC, f.uri DESC) AS item_no
+  FROM flagged AS f
+),
+runs AS (
+  SELECT n.item_no,
+         count(*)::integer AS row_count,
+         (array_agg(n.ts ORDER BY n.ts ASC, n.uri ASC))[1] AS oldest_ts,
+         (array_agg(n.uri ORDER BY n.ts ASC, n.uri ASC))[1] AS oldest_uri,
+         (array_agg(n.uri ORDER BY n.ts DESC, n.uri DESC))[1:$9::integer] AS samples
+  FROM numbered AS n
+  WHERE n.item_no <= $6::integer
+  GROUP BY n.item_no
+),
+items AS (
+  SELECT n.item_no, n.kind, n.uri, n.cid, n.did, n.ts, n.subject, n.deployment,
+         run.row_count, run.oldest_ts, run.oldest_uri, run.samples
+  FROM numbered AS n
+  JOIN runs AS run ON run.item_no = n.item_no
+  WHERE NOT n.continues_run
+),
+-- The audio group behind each audio head: every recording of that owner and
+-- folder on that UTC day, whoever stored it.
+audio_groups AS (
+  SELECT item.item_no, audio_group.total, audio_group.samples
+  FROM items AS item
   CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN pg_input_is_valid(source.record, 'jsonb')
-        THEN source.record::jsonb
-      ELSE NULL::jsonb
-    END AS value
-  ) AS source_json
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN (
-        source.indexed_at ~ timestamp_pattern.rfc3339_timestamp_pattern
-        OR source.indexed_at ~ timestamp_pattern.postgres_timestamp_pattern
-      )
-        AND source.indexed_at !~ timestamp_pattern.postgres_unknown_offset_suffix_pattern
-        AND pg_input_is_valid(source.indexed_at, 'timestamp with time zone')
-        THEN CASE
-          WHEN isfinite(source.indexed_at::timestamptz)
-            THEN source.indexed_at::timestamptz
-          ELSE NULL::timestamptz
-        END
-      ELSE NULL::timestamptz
-    END AS value
-  ) AS source_indexed_at
-  CROSS JOIN LATERAL (
-    SELECT COALESCE(
-      CASE
-        WHEN jsonb_typeof(source_json.value->'createdAt') = 'string'
-          AND source_json.value->>'createdAt' ~ timestamp_pattern.rfc3339_timestamp_pattern
-          AND source_json.value->>'createdAt' !~ timestamp_pattern.rfc3339_unknown_offset_suffix_pattern
-          AND pg_input_is_valid(
-            source_json.value->>'createdAt',
-            'timestamp with time zone'
-          )
-          THEN (source_json.value->>'createdAt')::timestamptz
-        ELSE NULL::timestamptz
-      END,
-      source_indexed_at.value
-    ) AS effective_at
-  ) AS source_time
-  WHERE source_time.effective_at IS NOT NULL
-    AND (
-      source.collection <> 'org.hypercerts.claim.activity'
-      OR NOT EXISTS (
-        SELECT 1 FROM paired_activities WHERE paired_activities.uri = source.uri
-      )
-    )
-    AND (
-      source.collection <> 'org.hypercerts.context.attachment'
-      OR source_json.value->>'contentType' = 'update'
-    )
-    AND (
-      source.collection <> 'app.certified.badge.award'
-      OR EXISTS (
-        SELECT 1
-        FROM valid_endorsement_awards AS award
-        WHERE award.uri = source.uri
-          AND award.cid = source.cid
-      )
-    )
+    SELECT count(*)::integer AS total,
+           (array_agg(member.uri ORDER BY member.record_created_at DESC, member.uri DESC))[1:$9::integer] AS samples
+    FROM record AS member
+    CROSS JOIN LATERAL (
+      SELECT CASE WHEN member.json->>'deploymentRef' LIKE 'at://%' THEN member.json->>'deploymentRef' END AS folder,
+             CASE WHEN member.json->>'deploymentRef' LIKE 'at://did:%'
+                  THEN substring(member.json->>'deploymentRef' from '^at://([^/]+)')
+                  ELSE member.did
+             END AS owner
+    ) AS audio_key
+    WHERE member.collection = 'app.gainforest.ac.audio'
+      AND member.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+      AND member.record_created_at >= date_trunc('day', item.ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+      AND member.record_created_at < (date_trunc('day', item.ts AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
+      AND member.validation_status = 'valid'
+      AND audio_key.owner = item.did
+      AND audio_key.folder IS NOT DISTINCT FROM item.deployment
+  ) AS audio_group
+  WHERE item.kind = 'audio' AND item.item_no < $6::integer
 ),
--- =============================================================================
--- Event classification and pagination
--- Convert eligible records into public event kinds, apply keyset pagination,
--- and return one limit-plus-one page.
--- =============================================================================
-classified_events AS (
-  SELECT
-    source.uri,
-    source.cid,
-    source.collection,
-    source.did AS actor_did,
-    CASE source.collection
-      WHEN 'org.hypercerts.claim.activity' THEN 'cert.create'
-      WHEN 'org.hypercerts.collection' THEN
-        CASE
-          WHEN EXISTS (
-            SELECT 1 FROM paired_collections WHERE paired_collections.uri = source.uri
-          ) THEN 'project.created_with_cert'
-          ELSE 'collection.create'
-        END
-      WHEN 'org.hypercerts.context.evaluation' THEN 'evaluation.create'
-      WHEN 'org.hypercerts.context.measurement' THEN 'measurement.create'
-      WHEN 'org.hypercerts.context.attachment' THEN 'update.create'
-      WHEN 'app.certified.badge.award' THEN 'endorsement.award'
-    END AS kind,
-    source.effective_at
-  FROM eligible_records AS source
-),
-filtered_events AS (
-  SELECT event.*
-  FROM classified_events AS event
-  WHERE (cardinality($7::text[]) = 0 OR event.kind = ANY($7::text[]))
-    AND (
-      $8::timestamptz IS NULL
-      OR event.effective_at < $8::timestamptz
-      -- URI is the deterministic tie-breaker for equal timestamps.
-      OR (event.effective_at = $8::timestamptz AND event.uri < $9::text)
-    )
-),
-paged_events AS (
-  SELECT *
-  FROM filtered_events
-  ORDER BY effective_at DESC, uri DESC
-  LIMIT $10::integer
+-- The page is exact when both of these hold:
+--  * the item after it was found, or nothing was cut off the merged order; and
+--  * the audio groups are known as far down as the page reaches. The audio
+--    scan sees every recording down to its horizon, the oldest recording it
+--    read. Below that, groups can be missing unless the scan already found as
+--    many as a page can use.
+completeness AS (
+  SELECT (
+           (SELECT count(*) FROM audio_heads) >= $6::integer
+           OR NOT EXISTS (SELECT 1 FROM audio_horizon)
+           OR EXISTS (
+             SELECT 1
+             FROM items AS sentinel, audio_horizon AS horizon
+             WHERE sentinel.item_no = $6::integer
+               AND (sentinel.ts, sentinel.uri) >= (horizon.ts, horizon.uri)
+           )
+         )
+         AND (
+           (SELECT count(*) FROM items) >= $6::integer
+           OR (SELECT count(*) FROM stream) < $7::integer
+         ) AS complete
 )
-SELECT
-  page.uri,
-  page.cid,
-  page.collection,
-  page.actor_did,
-  page.kind,
-  to_char(
-    page.effective_at AT TIME ZONE 'UTC',
-    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
-  ) AS sort_value,
-  selected_source.uri AS selected_source_uri,
-  selected_source.cid AS selected_source_cid,
-  selected_source.collection AS selected_source_collection,
-  selected_source.record AS source_json
-FROM paged_events AS page
-LEFT JOIN happyview_records AS selected_source
-  ON $12::boolean
- AND selected_source.uri = page.uri
- AND selected_source.cid = page.cid
- AND selected_source.collection = page.collection
-ORDER BY page.effective_at DESC, page.uri DESC
+SELECT completeness.complete,
+       item.item_no::integer AS item_no,
+       item.kind,
+       item.uri,
+       -- Hyperindex stores an empty CID for records whose event carried none.
+       NULLIF(item.cid, '') AS cid,
+       item.did,
+       to_char(item.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_value,
+       item.subject,
+       item.deployment,
+       to_char(item.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+       (CASE WHEN item.kind = 'audio' THEN audio_group.total ELSE item.row_count END)::integer AS total,
+       to_char(item.oldest_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS tail_sort_value,
+       item.oldest_uri AS tail_uri,
+       CASE WHEN item.kind = 'audio' THEN audio_group.samples ELSE item.samples END AS samples
+FROM completeness
+LEFT JOIN items AS item ON true
+LEFT JOIN audio_groups AS audio_group ON audio_group.item_no = item.item_no
+ORDER BY item.item_no

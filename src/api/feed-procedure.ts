@@ -16,14 +16,14 @@ import {
 } from '@atproto/lex-server'
 import type { Logger } from 'pino'
 
-import type { $input as feedInput } from '../lexicons/org/hypercerts/feed/getFeedSkeleton.defs.js'
+import type { $input as feedInput } from '../lexicons/app/gainforest/feed/getFeedSkeleton.defs.js'
 import { applyAuthenticatedViewer } from '../auth/input.js'
 import type {
   OptionalServiceAuth,
   ServiceAuthCredentials,
 } from '../auth/service-auth.js'
 import { FeedError, FeedErrorCode } from '../feed/errors.js'
-import type { GetFeedSkeletonInput } from '../feed/types.js'
+import type { FeedRequest } from '../feed/types.js'
 
 type JsonProcedure = Procedure<
   NsidString,
@@ -38,7 +38,7 @@ type FeedProcedureOutputParser<Output> = (
   output: Output,
 ) => InferMethodOutputBody<JsonProcedure>
 
-const toFeedInput = (input: FeedProcedureInput): GetFeedSkeletonInput => ({
+const toFeedInput = (input: FeedProcedureInput): FeedRequest => ({
   feedId: input.feedId,
   ...(input.params === undefined ? {} : { params: input.params }),
   ...(input.limit === undefined ? {} : { limit: input.limit }),
@@ -50,7 +50,7 @@ interface RegisterFeedProcedureOptions<Output> {
   readonly method: Main<JsonProcedure>
   readonly logger: Logger
   readonly auth: OptionalServiceAuth | undefined
-  readonly execute: (input: GetFeedSkeletonInput) => Promise<Output>
+  readonly execute: (input: FeedRequest) => Promise<Output>
   readonly parseOutput: FeedProcedureOutputParser<Output>
   readonly errorLog: string
 }

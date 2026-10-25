@@ -1,4 +1,3 @@
-import { lexParse, type BlobRef } from '@atproto/lex'
 import { LexServerAuthError } from '@atproto/lex-server'
 import { createServer } from '@atproto/lex-server/nodejs'
 import type { AddressInfo } from 'node:net'
@@ -12,32 +11,23 @@ import type {
 } from '../src/auth/service-auth.js'
 import type { DatabaseCompatibilityChecker } from '../src/database.js'
 import { FeedError, FeedErrorCode } from '../src/feed/errors.js'
-import type { FeedSkeletonReader } from '../src/feed/service.js'
+import type { FeedReader, FeedSkeletonReader } from '../src/feed/service.js'
 import {
-  HYPERCERTS_FEED_ID,
-  HYPERCERTS_FEED_PARAMS_TYPE,
-  type GetFeedSkeletonInput,
+  ACTIVITY_FEED_ID,
+  ACTIVITY_FEED_PARAMS_TYPE,
+  RECORD_ITEM_TYPE,
+  type FeedRequest,
 } from '../src/feed/types.js'
-import type { HydratedFeedReader } from '../src/hydration/service.js'
 import { Metrics } from '../src/metrics.js'
 
 const viewer = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const actor = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
-const uri = `at://${actor}/org.hypercerts.claim.activity/3kpn`
-const blobCid = 'bafkreiehxpuhtr5f6v4eu4byjo2j7kkrhjvd7psmfu4imnpdzb3bdqb7vy'
-const avatarBlob = lexParse<BlobRef>(
-  JSON.stringify({
-    $type: 'blob',
-    ref: { $link: blobCid },
-    mimeType: 'image/png',
-    size: 128,
-  }),
-  { strict: true },
-)
+const uri = `at://${actor}/app.gainforest.feed.post/3kpn`
+const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
 const logger = pino({ enabled: false })
 
-const skeletonPath = 'http://localhost/xrpc/org.hypercerts.feed.getFeedSkeleton'
-const hydratedPath = 'http://localhost/xrpc/org.hypercerts.feed.getFeed'
+const skeletonPath = 'http://localhost/xrpc/app.gainforest.feed.getFeedSkeleton'
+const feedPath = 'http://localhost/xrpc/app.gainforest.feed.getFeed'
 
 const compatibleDatabase: DatabaseCompatibilityChecker = {
   checkCompatibility: vi.fn(() => Promise.resolve({ compatible: true })),
@@ -47,14 +37,14 @@ const emptySkeleton = (): FeedSkeletonReader => ({
   getFeedSkeleton: vi.fn(() => Promise.resolve({ feed: [] })),
 })
 
-const emptyHydrated = (): HydratedFeedReader => ({
+const emptyFeed = (): FeedReader => ({
   getFeed: vi.fn(() => Promise.resolve({ feed: [] })),
 })
 
 const appServices = (
   skeleton: FeedSkeletonReader = emptySkeleton(),
-  hydrated: HydratedFeedReader = emptyHydrated(),
-): AppFeedServices => ({ skeleton, hydrated })
+  feed: FeedReader = emptyFeed(),
+): AppFeedServices => ({ skeleton, feed })
 
 type JsonObject = Record<string, unknown>
 
@@ -86,9 +76,9 @@ const serverAddress = (
   return address
 }
 
-const feedRequest = (viewerDid = viewer): GetFeedSkeletonInput => ({
-  feedId: HYPERCERTS_FEED_ID,
-  params: { $type: HYPERCERTS_FEED_PARAMS_TYPE, viewerDid },
+const feedRequest = (viewerDid = viewer): FeedRequest => ({
+  feedId: ACTIVITY_FEED_ID,
+  params: { $type: ACTIVITY_FEED_PARAMS_TYPE, viewerDid },
 })
 
 const post = (
@@ -114,7 +104,7 @@ const trustedCredentials = (
       iss: did,
       aud: 'did:web:feed.example',
       exp: 1,
-      lxm: 'org.hypercerts.feed.getFeedSkeleton',
+      lxm: 'app.gainforest.feed.getFeedSkeleton',
     },
     message: new Uint8Array(),
     signature: new Uint8Array(),
@@ -162,8 +152,8 @@ describe('HTTP application', () => {
     try {
       const address = serverAddress(server)
       for (const method of [
-        'org.hypercerts.feed.getFeedSkeleton',
-        'org.hypercerts.feed.getFeed',
+        'app.gainforest.feed.getFeedSkeleton',
+        'app.gainforest.feed.getFeed',
       ]) {
         const response = await fetch(
           `http://127.0.0.1:${String(address.port)}/xrpc/${method}`,
@@ -174,8 +164,8 @@ describe('HTTP application', () => {
               authorization: 'Bearer test-token',
             },
             body: JSON.stringify({
-              feedId: HYPERCERTS_FEED_ID,
-              params: { $type: HYPERCERTS_FEED_PARAMS_TYPE },
+              feedId: ACTIVITY_FEED_ID,
+              params: { $type: ACTIVITY_FEED_PARAMS_TYPE },
               limit: 1,
             }),
           },
@@ -202,11 +192,12 @@ describe('HTTP application', () => {
     expect(response.status).toBe(200)
     expect(response.headers.get('cache-control')).toBe('no-store')
     await expect(response.json()).resolves.toEqual({
-      name: 'Hypercerts Feed Service',
-      description: 'Read-only Hypercerts feeds over XRPC.',
+      name: 'GainForest Feed Service',
+      description:
+        'Read-only GainForest activity feed over XRPC. Returns references and selection metadata, not records.',
       endpoints: [
-        '/xrpc/org.hypercerts.feed.getFeedSkeleton',
-        '/xrpc/org.hypercerts.feed.getFeed',
+        '/xrpc/app.gainforest.feed.getFeedSkeleton',
+        '/xrpc/app.gainforest.feed.getFeed',
       ],
     })
     const metricText = await metrics.registry.metrics()
@@ -234,8 +225,8 @@ describe('HTTP application', () => {
       id: 'did:web:dev.feed.hypercerts.dev',
       service: [
         {
-          id: '#hypercerts_feed',
-          type: 'HypercertsFeedService',
+          id: '#gainforest_feed',
+          type: 'GainForestFeedService',
           serviceEndpoint: 'https://dev.feed.hypercerts.dev',
         },
       ],
@@ -262,8 +253,8 @@ describe('HTTP application', () => {
       id: 'did:web:feed.hypercerts.dev',
       service: [
         {
-          id: '#hypercerts_feed',
-          type: 'HypercertsFeedService',
+          id: '#gainforest_feed',
+          type: 'GainForestFeedService',
           serviceEndpoint: 'https://feed.hypercerts.dev',
         },
       ],
@@ -321,10 +312,10 @@ describe('HTTP application', () => {
     })
   })
 
-  it('serves the generic skeleton POST procedure', async () => {
-    let received: GetFeedSkeletonInput | undefined
+  it('serves the skeleton POST procedure', async () => {
+    let received: FeedRequest | undefined
     const skeleton: FeedSkeletonReader = {
-      getFeedSkeleton: vi.fn((input: GetFeedSkeletonInput) => {
+      getFeedSkeleton: vi.fn((input: FeedRequest) => {
         received = input
         return Promise.resolve({ feed: [{ subject: uri }] })
       }),
@@ -349,26 +340,26 @@ describe('HTTP application', () => {
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
   ] as const)(
     'binds authenticated omitted viewerDid to the %s service',
     async (_label, url) => {
-      let received: GetFeedSkeletonInput | undefined
+      let received: FeedRequest | undefined
       const skeleton: FeedSkeletonReader = {
-        getFeedSkeleton: vi.fn((input: GetFeedSkeletonInput) => {
+        getFeedSkeleton: vi.fn((input: FeedRequest) => {
           received = input
           return Promise.resolve({ feed: [] })
         }),
       }
-      const hydrated: HydratedFeedReader = {
-        getFeed: vi.fn((input: GetFeedSkeletonInput) => {
+      const feedReader: FeedReader = {
+        getFeed: vi.fn((input: FeedRequest) => {
           received = input
           return Promise.resolve({ feed: [] })
         }),
       }
       const app = createApp(
         compatibleDatabase,
-        appServices(skeleton, hydrated),
+        appServices(skeleton, feedReader),
         new Metrics(),
         logger,
         authFor(trustedCredentials(viewer)),
@@ -378,8 +369,8 @@ describe('HTTP application', () => {
         post(
           url,
           JSON.stringify({
-            feedId: HYPERCERTS_FEED_ID,
-            params: { $type: HYPERCERTS_FEED_PARAMS_TYPE },
+            feedId: ACTIVITY_FEED_ID,
+            params: { $type: ACTIVITY_FEED_PARAMS_TYPE },
           }),
           { authorization: 'Bearer trusted-token' },
         ),
@@ -387,15 +378,15 @@ describe('HTTP application', () => {
 
       expect(response.status).toBe(200)
       expect(received).toMatchObject({
-        feedId: HYPERCERTS_FEED_ID,
-        params: { $type: HYPERCERTS_FEED_PARAMS_TYPE, viewerDid: viewer },
+        feedId: ACTIVITY_FEED_ID,
+        params: { $type: ACTIVITY_FEED_PARAMS_TYPE, viewerDid: viewer },
       })
     },
   )
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
   ] as const)(
     'rejects an authenticated supplied viewer mismatch on the %s route',
     async (_label, url) => {
@@ -428,9 +419,9 @@ describe('HTTP application', () => {
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
   ] as const)(
-    'requires viewerDid for anonymous requests on the %s route',
+    'requires viewerDid for anonymous following requests on the %s route',
     async (_label, url) => {
       const getFeedSkeleton = vi.fn()
       const getFeed = vi.fn()
@@ -446,8 +437,8 @@ describe('HTTP application', () => {
         post(
           url,
           JSON.stringify({
-            feedId: HYPERCERTS_FEED_ID,
-            params: { $type: HYPERCERTS_FEED_PARAMS_TYPE },
+            feedId: ACTIVITY_FEED_ID,
+            params: { $type: ACTIVITY_FEED_PARAMS_TYPE, following: true },
           }),
         ),
       )
@@ -458,14 +449,61 @@ describe('HTTP application', () => {
       await expectErrorResponse(
         response,
         'InvalidRequest',
-        'required for anonymous requests',
+        'required for anonymous requests that set following',
       )
     },
   )
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
+  ] as const)(
+    'serves the anonymous global feed on the %s route without a viewer',
+    async (_label, url) => {
+      let received: FeedRequest | undefined
+      const app = createApp(
+        compatibleDatabase,
+        appServices(
+          {
+            getFeedSkeleton: vi.fn((input: FeedRequest) => {
+              received = input
+              return Promise.resolve({ feed: [] })
+            }),
+          },
+          {
+            getFeed: vi.fn((input: FeedRequest) => {
+              received = input
+              return Promise.resolve({ feed: [] })
+            }),
+          },
+        ),
+        new Metrics(),
+        logger,
+        authFor(undefined),
+      )
+
+      const response = await app.fetch(
+        post(
+          url,
+          JSON.stringify({
+            feedId: ACTIVITY_FEED_ID,
+            params: { $type: ACTIVITY_FEED_PARAMS_TYPE, filter: 'post' },
+          }),
+        ),
+      )
+
+      expect(response.status).toBe(200)
+      expect(received?.params).toEqual({
+        $type: ACTIVITY_FEED_PARAMS_TYPE,
+        filter: 'post',
+        following: false,
+      })
+    },
+  )
+
+  it.each([
+    ['skeleton', skeletonPath],
+    ['feed', feedPath],
   ] as const)(
     'does not fall back to anonymous on invalid auth for the %s route',
     async (_label, url) => {
@@ -493,73 +531,86 @@ describe('HTTP application', () => {
     },
   )
 
-  it('serves the unauthenticated hydrated POST procedure', async () => {
-    let received: GetFeedSkeletonInput | undefined
-    const hydrated: HydratedFeedReader = {
-      getFeed: vi.fn((input: GetFeedSkeletonInput) => {
+  it('serves every reference item shape from the getFeed procedure', async () => {
+    let received: FeedRequest | undefined
+    const feedReader: FeedReader = {
+      getFeed: vi.fn((input: FeedRequest) => {
         received = input
         return Promise.resolve({
           feed: [
             {
-              subject: uri,
-              view: {
-                $type: 'org.hypercerts.feed.defs#hypercertsFeedView' as const,
-                kind: 'cert.create' as const,
-                actor: {
-                  did: actor,
-                  avatar: {
-                    $type: 'org.hypercerts.defs#smallImage' as const,
-                    image: avatarBlob,
-                  },
-                },
-                content: {
-                  $type: 'org.hypercerts.feed.defs#activityView' as const,
-                  title: 'Restore the watershed',
-                  locationCount: 0,
-                },
-              },
+              $type: RECORD_ITEM_TYPE,
+              kind: 'post' as const,
+              uri,
+              cid,
+              did: actor,
+              createdAt: '2026-07-21T10:00:00.000Z',
+            },
+            {
+              $type: 'app.gainforest.feed.defs#burstItem' as const,
+              did: actor,
+              total: 300,
+              from: '2026-07-21T09:00:00.000Z',
+              to: '2026-07-21T09:30:00.000Z',
+              subjects: [`at://${actor}/app.gainforest.dwc.occurrence/o1`],
+            },
+            {
+              $type: 'app.gainforest.feed.defs#audioItem' as const,
+              did: actor,
+              day: '2026-07-20',
+              total: 12,
+              createdAt: '2026-07-20T23:00:00.000Z',
+              subjects: [`at://${actor}/app.gainforest.ac.audio/a1`],
             },
           ],
+          cursor: 'next',
         })
       }),
     }
     const app = createApp(
       compatibleDatabase,
-      appServices(emptySkeleton(), hydrated),
+      appServices(emptySkeleton(), feedReader),
       new Metrics(),
       logger,
     )
 
     const response = await app.fetch(
-      post(hydratedPath, JSON.stringify(feedRequest())),
+      post(feedPath, JSON.stringify(feedRequest())),
     )
 
     expect(response.status).toBe(200)
-    expect(received).toMatchObject(feedRequest())
-    await expect(response.json()).resolves.toMatchObject({
+    expect(received).toMatchObject({
+      feedId: ACTIVITY_FEED_ID,
+      params: { $type: ACTIVITY_FEED_PARAMS_TYPE, viewerDid: viewer },
+    })
+    await expect(response.json()).resolves.toEqual({
       feed: [
         {
-          subject: uri,
-          view: {
-            $type: 'org.hypercerts.feed.defs#hypercertsFeedView',
-            actor: {
-              did: actor,
-              avatar: {
-                $type: 'org.hypercerts.defs#smallImage',
-                image: {
-                  $type: 'blob',
-                  ref: { $link: blobCid },
-                  mimeType: 'image/png',
-                  size: 128,
-                },
-              },
-            },
-            content: {
-              $type: 'org.hypercerts.feed.defs#activityView',
-            },
-          },
+          $type: RECORD_ITEM_TYPE,
+          kind: 'post',
+          uri,
+          cid,
+          did: actor,
+          createdAt: '2026-07-21T10:00:00.000Z',
+        },
+        {
+          $type: 'app.gainforest.feed.defs#burstItem',
+          did: actor,
+          total: 300,
+          from: '2026-07-21T09:00:00.000Z',
+          to: '2026-07-21T09:30:00.000Z',
+          subjects: [`at://${actor}/app.gainforest.dwc.occurrence/o1`],
+        },
+        {
+          $type: 'app.gainforest.feed.defs#audioItem',
+          did: actor,
+          day: '2026-07-20',
+          total: 12,
+          createdAt: '2026-07-20T23:00:00.000Z',
+          subjects: [`at://${actor}/app.gainforest.ac.audio/a1`],
         },
       ],
+      cursor: 'next',
     })
   })
 
@@ -573,7 +624,7 @@ describe('HTTP application', () => {
       'http://localhost:4173',
     ]) {
       const response = await app.fetch(
-        new Request(hydratedPath, {
+        new Request(feedPath, {
           method: 'OPTIONS',
           headers: {
             origin,
@@ -618,7 +669,7 @@ describe('HTTP application', () => {
     const app = createApp(compatibleDatabase, appServices(), metrics, logger)
 
     const response = await app.fetch(
-      new Request(hydratedPath, {
+      new Request(feedPath, {
         method: 'OPTIONS',
         headers: {
           origin: 'https://certified.app',
@@ -710,7 +761,7 @@ describe('HTTP application', () => {
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
   ])(
     'rejects malformed JSON for the %s route without invoking services',
     async (_label, url) => {
@@ -744,7 +795,7 @@ describe('HTTP application', () => {
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
   ])(
     'rejects an oversized declared body for the %s route',
     async (_label, url) => {
@@ -800,7 +851,7 @@ describe('HTTP application', () => {
     })
 
     const response = await app.fetch(
-      new Request(hydratedPath, {
+      new Request(feedPath, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body,
@@ -816,7 +867,7 @@ describe('HTTP application', () => {
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
   ])('rejects non-POST requests for the %s procedure', async (_label, url) => {
     const getFeedSkeleton = vi.fn()
     const getFeed = vi.fn()
@@ -848,24 +899,19 @@ describe('HTTP application', () => {
       }),
     ],
     [
-      'hydrated',
-      hydratedPath,
+      'feed',
+      feedPath,
       appServices(emptySkeleton(), {
         getFeed: vi.fn(() =>
           Promise.resolve({
             feed: [
               {
-                subject: 'not-an-at-uri',
-                view: {
-                  $type: 'org.hypercerts.feed.defs#hypercertsFeedView' as const,
-                  kind: 'cert.create' as const,
-                  actor: { did: 'not-a-did' },
-                  content: {
-                    $type: 'org.hypercerts.feed.defs#activityView' as const,
-                    title: 'Invalid response fixture',
-                    locationCount: 0,
-                  },
-                },
+                $type: RECORD_ITEM_TYPE,
+                kind: 'post' as const,
+                uri: 'not-an-at-uri',
+                cid,
+                did: actor,
+                createdAt: '2026-07-21T10:00:00.000Z',
               },
             ],
           }),
@@ -887,8 +933,8 @@ describe('HTTP application', () => {
   )
 
   it.each([
-    ['org.hypercerts.feed.getFeedSkeleton', skeletonPath],
-    ['org.hypercerts.feed.getFeed', hydratedPath],
+    ['app.gainforest.feed.getFeedSkeleton', skeletonPath],
+    ['app.gainforest.feed.getFeed', feedPath],
   ])('normalizes Lexicon validation failures for %s', async (nsid, url) => {
     const app = createApp(
       compatibleDatabase,
@@ -905,7 +951,7 @@ describe('HTTP application', () => {
 
   it.each([
     ['skeleton', skeletonPath],
-    ['hydrated', hydratedPath],
+    ['feed', feedPath],
   ])(
     'rejects a malformed viewer for the %s route as InvalidRequest',
     async (_label, url) => {
@@ -945,8 +991,8 @@ describe('HTTP application', () => {
       }),
     ],
     [
-      'hydrated',
-      hydratedPath,
+      'feed',
+      feedPath,
       appServices(emptySkeleton(), {
         getFeed: vi.fn(() =>
           Promise.reject(
@@ -1033,7 +1079,7 @@ describe('HTTP application', () => {
     })
   })
 
-  it('translates expected hydrated FeedError details without leaking its cause', async () => {
+  it('translates expected feed FeedError details without leaking its cause', async () => {
     const internalCause = new Error('secret database detail')
     const getFeed = vi.fn(() =>
       Promise.reject(
@@ -1053,7 +1099,7 @@ describe('HTTP application', () => {
     )
 
     const response = await app.fetch(
-      post(hydratedPath, JSON.stringify(feedRequest())),
+      post(feedPath, JSON.stringify(feedRequest())),
     )
     const responseText = await response.text()
 
@@ -1066,9 +1112,15 @@ describe('HTTP application', () => {
     expect(responseText).not.toContain(internalCause.message)
   })
 
-  it('redacts unknown hydrated failures and records bounded route/error metrics', async () => {
+  it('translates ScanLimitExceeded into a non-retryable 422 with its own metric label', async () => {
     const getFeed = vi.fn(() =>
-      Promise.reject(new Error('secret hydrated failure')),
+      Promise.reject(
+        new FeedError(
+          FeedErrorCode.ScanLimitExceeded,
+          'This page needs more than 2097152 rows. Retrying the same request will not help.',
+          422,
+        ),
+      ),
     )
     const metrics = new Metrics()
     const app = createApp(
@@ -1079,15 +1131,42 @@ describe('HTTP application', () => {
     )
 
     const response = await app.fetch(
-      post(hydratedPath, JSON.stringify(feedRequest())),
+      post(feedPath, JSON.stringify(feedRequest())),
+    )
+
+    expect(response.status).toBe(422)
+    await expect(response.json()).resolves.toEqual({
+      error: 'ScanLimitExceeded',
+      message:
+        'This page needs more than 2097152 rows. Retrying the same request will not help.',
+    })
+    expect(await metrics.registry.metrics()).toContain(
+      'hypercerts_feed_errors_total{error="ScanLimitExceeded"} 1',
+    )
+  })
+
+  it('redacts unknown getFeed failures and records bounded route/error metrics', async () => {
+    const getFeed = vi.fn(() =>
+      Promise.reject(new Error('secret feed failure')),
+    )
+    const metrics = new Metrics()
+    const app = createApp(
+      compatibleDatabase,
+      appServices(emptySkeleton(), { getFeed }),
+      metrics,
+      logger,
+    )
+
+    const response = await app.fetch(
+      post(feedPath, JSON.stringify(feedRequest())),
     )
     const responseText = await response.text()
     const metricText = await metrics.registry.metrics()
 
     expect(response.status).toBe(500)
-    expect(responseText).not.toContain('secret hydrated failure')
+    expect(responseText).not.toContain('secret feed failure')
     expect(JSON.parse(responseText)).toMatchObject({ error: 'InternalError' })
-    expect(metricText).toContain('route="feed_hydrated"')
+    expect(metricText).toContain('route="feed"')
     expect(metricText).toContain('error="InternalError"')
     expect(metricText).not.toContain(viewer)
     expect(metricText).not.toContain(uri)

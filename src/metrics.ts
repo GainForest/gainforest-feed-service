@@ -7,7 +7,7 @@ import {
 } from 'prom-client'
 
 import type { FeedErrorCode } from './feed/errors.js'
-import type { FeedKind } from './feed/types.js'
+import type { FeedItemKind } from './feed/types.js'
 
 const boundedHttpMethod = (method: string): 'GET' | 'POST' | 'OTHER' => {
   if (method === 'GET' || method === 'POST') return method
@@ -59,7 +59,7 @@ export class Metrics {
     })
     this.#resultKinds = new Counter({
       name: 'hypercerts_feed_result_kinds_total',
-      help: 'Generated feed items grouped by bounded event kind.',
+      help: 'Generated feed items grouped by bounded item kind.',
       labelNames: ['kind'],
       registers: [this.registry],
     })
@@ -99,8 +99,8 @@ export class Metrics {
     this.#databaseDuration.observe({ operation }, durationSeconds)
   }
 
-  /** Records generated page size and its bounded event-kind distribution. */
-  observeResult(kinds: readonly FeedKind[]): void {
+  /** Records generated page size and its bounded item-kind distribution. */
+  observeResult(kinds: readonly FeedItemKind[]): void {
     this.#resultItems.observe(kinds.length)
     for (const kind of kinds) this.#resultKinds.inc({ kind })
   }

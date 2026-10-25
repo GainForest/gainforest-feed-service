@@ -10,7 +10,7 @@ export interface Config {
   readonly metricsHost: string
   /** TCP port used by the optional metrics server, or undefined when disabled. */
   readonly metricsPort: number | undefined
-  /** Postgres connection URL for HappyView's existing database. */
+  /** Postgres connection URL for Hyperindex's existing database. */
   readonly databaseUrl: string
   /** Maximum number of Postgres sessions held by this sidecar. */
   readonly databaseMaxConnections: number
@@ -30,8 +30,6 @@ export interface Config {
   readonly serviceAuthMaxAgeSeconds: number
   /** Maximum time allowed for one DID document resolution. */
   readonly didResolutionTimeoutMs: number
-  /** Orglabeler DIDs trusted to provide account-quality labels. */
-  readonly trustedQualityLabelerDids: readonly string[]
   /** Pino logging threshold. */
   readonly logLevel: string
 }
@@ -81,7 +79,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
   const databaseUrl = env.DATABASE_URL
   if (databaseUrl === undefined || databaseUrl === '') {
     throw new Error(
-      'DATABASE_URL is required; set it to the dedicated read-only Postgres connection URL for the HappyView database.',
+      'DATABASE_URL is required; set it to the dedicated read-only Postgres connection URL for the Hyperindex database.',
     )
   }
   let parsedDatabaseUrl: URL
@@ -108,23 +106,6 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
   if (!isValidDid(serviceDid)) {
     throw new Error(
       `SERVICE_DID ${JSON.stringify(serviceDid)} is not a valid DID; set it to the DID identifying this service.`,
-    )
-  }
-
-  const trustedQualityLabelerDids = [
-    ...new Set(
-      (env.TRUSTED_QUALITY_LABELER_DIDS ?? '')
-        .split(',')
-        .map((value) => value.trim())
-        .filter(Boolean),
-    ),
-  ]
-  const invalidLabeler = trustedQualityLabelerDids.find(
-    (did) => !isValidDid(did),
-  )
-  if (invalidLabeler !== undefined) {
-    throw new Error(
-      `TRUSTED_QUALITY_LABELER_DIDS contains invalid DID ${JSON.stringify(invalidLabeler)}; use a comma-separated list of valid DIDs.`,
     )
   }
 
@@ -202,7 +183,6 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): Config => {
       100,
       120_000,
     ),
-    trustedQualityLabelerDids,
     logLevel:
       env.LOG_LEVEL === undefined || env.LOG_LEVEL === ''
         ? 'info'

@@ -4,15 +4,9 @@ import type { QueryResultRow } from 'pg'
 
 import { decodeCursor, encodeCursor, type CursorCodec } from './cursor.js'
 import { FeedError, FeedErrorCode } from './errors.js'
-import type {
-  FeedPageMode,
-  FeedPagination,
-  InternalFeedPage,
-  InternalFeedRow,
-  InternalSourceFeedRow,
-  RegisteredFeed,
-} from './registry.js'
-import type { FeedParams } from './types.js'
+import { feedItemKind } from './items.js'
+import type { FeedPage, FeedPagination, RegisteredFeed } from './registry.js'
+import type { ActivityFeedItem, FeedParams } from './types.js'
 import type { Metrics } from '../metrics.js'
 
 export interface NormalizedPageParams {
@@ -32,21 +26,29 @@ export interface SqlFeedRuntime<Row extends QueryResultRow> {
   readonly metrics: Metrics
 }
 
-const hasSourceValue = <Row extends InternalFeedRow>(
-  row: Row | (Row & InternalSourceFeedRow),
-): row is Row & InternalSourceFeedRow => Object.hasOwn(row, 'sourceValue')
+/** Where the next page continues: strictly after this feed position. */
+export interface FeedPosition {
+  readonly sortValue: string
+  readonly uri: string
+}
 
-export type FeedRowMapper<DatabaseRow, FeedRow extends InternalFeedRow> = (
-  row: DatabaseRow,
-  mode: FeedPageMode,
-) => FeedRow | (FeedRow & InternalSourceFeedRow)
+/** One selected feed item and the last feed position it consumed. */
+export interface SelectedItem {
+  readonly item: ActivityFeedItem
+  readonly position: FeedPosition
+}
+
+/** The items selected for one page, and whether a later page exists. */
+export interface SelectedPage {
+  readonly items: readonly SelectedItem[]
+  readonly hasNext: boolean
+}
 
 export interface SqlFeedDefinition<
   Params extends FeedParams,
   Normalized extends NormalizedPageParams,
   Cursor,
   DatabaseRow extends QueryResultRow,
-  FeedRow extends InternalFeedRow,
 > {
   readonly id: string
   readonly params: {
@@ -56,107 +58,68 @@ export interface SqlFeedDefinition<
       params: Params,
       pagination: FeedPagination,
     ) => Normalized
+    /** Params applied when a request omits them; leave unset to require params. */
+    readonly default?: Params
   }
-  readonly sql: string
-  readonly bind: (input: {
-    readonly params: Normalized
-    readonly cursor: Cursor | undefined
-    readonly mode: FeedPageMode
-    readonly fetchLimit: number
-  }) => readonly unknown[]
-  readonly cursor: CursorCodec<Cursor, FeedRow>
-  readonly mapRow: FeedRowMapper<DatabaseRow, FeedRow>
+  readonly cursor: CursorCodec<Cursor, FeedPosition>
+  /**
+   * Selects at most `params.limit` items in feed order strictly after
+   * `cursor`, and reports whether another item follows them.
+   */
+  readonly select: (
+    database: SqlFeedQueryExecutor<DatabaseRow>,
+    input: {
+      readonly params: Normalized
+      readonly cursor: Cursor | undefined
+    },
+  ) => Promise<SelectedPage>
 }
 
+/** Owns parameter parsing, cursor handling, timing, and metrics around a SQL feed. */
 export const defineSqlFeed = <
   Params extends FeedParams,
   Normalized extends NormalizedPageParams,
   Cursor,
   DatabaseRow extends QueryResultRow,
-  FeedRow extends InternalFeedRow,
 >(
   runtime: SqlFeedRuntime<DatabaseRow>,
-  definition: SqlFeedDefinition<
-    Params,
-    Normalized,
-    Cursor,
-    DatabaseRow,
-    FeedRow
-  >,
+  definition: SqlFeedDefinition<Params, Normalized, Cursor, DatabaseRow>,
 ): RegisteredFeed => {
-  const finishPage = <Row extends FeedRow>(
-    rows: readonly Row[],
-    normalized: Normalized,
-    fetchLimit: number,
-  ): InternalFeedPage<Row> => {
-    if (rows.length > fetchLimit) {
-      throw new Error(
-        `Feed query for ${definition.id} returned ${String(rows.length)} rows after requesting at most ${String(fetchLimit)}; apply the registered limit inside the SQL statement.`,
-      )
-    }
-
-    const hasNext = rows.length > normalized.limit
-    const page = hasNext ? rows.slice(0, normalized.limit) : rows
-    runtime.metrics.observeResult(page.map((row) => row.kind))
-
-    const last = page.at(-1)
-    return {
-      rows: page,
-      ...(hasNext && last
-        ? {
-            cursor: encodeCursor(definition.id, last, definition.cursor),
-          }
-        : {}),
-    }
-  }
-
-  function loadPage(
-    params: FeedParams | undefined,
-    pagination: FeedPagination,
-    mode: 'metadata',
-  ): Promise<InternalFeedPage<InternalFeedRow>>
-  function loadPage(
-    params: FeedParams | undefined,
-    pagination: FeedPagination,
-    mode: 'with-source',
-  ): Promise<InternalFeedPage<InternalSourceFeedRow>>
   async function loadPage(
     params: FeedParams | undefined,
     pagination: FeedPagination,
-    mode: FeedPageMode,
-  ): Promise<InternalFeedPage<InternalFeedRow | InternalSourceFeedRow>> {
-    if (params === undefined) {
+  ): Promise<FeedPage> {
+    const requested = params ?? definition.params.default
+    if (requested === undefined) {
       throw new FeedError(
         FeedErrorCode.InvalidRequest,
         `feedId ${JSON.stringify(definition.id)} requires params with $type ${JSON.stringify(definition.params.type)}; provide those params and retry.`,
       )
     }
-    if (params.$type !== definition.params.type) {
+    if (requested.$type !== definition.params.type) {
       throw new FeedError(
         FeedErrorCode.InvalidRequest,
-        `params.$type ${JSON.stringify(params.$type)} does not match feedId ${JSON.stringify(definition.id)}; use ${JSON.stringify(definition.params.type)} and retry.`,
+        `params.$type ${JSON.stringify(requested.$type)} does not match feedId ${JSON.stringify(definition.id)}; use ${JSON.stringify(definition.params.type)} and retry.`,
       )
     }
 
-    const parsed = definition.params.parse(params)
-    const normalized = definition.params.normalize(parsed, pagination)
+    const normalized = definition.params.normalize(
+      definition.params.parse(requested),
+      pagination,
+    )
     const cursor = decodeCursor(
       definition.id,
       normalized.cursor,
       definition.cursor,
     )
-    const fetchLimit = normalized.limit + 1
-    const values = definition.bind({
-      params: normalized,
-      cursor,
-      mode,
-      fetchLimit,
-    })
 
     const startedAt = performance.now()
-    let result: { readonly rows: readonly DatabaseRow[] }
+    let selected: SelectedPage
     try {
-      result = await runtime.database.query(definition.sql, values)
+      selected = await definition.select(runtime.database, {
+        params: normalized,
+        cursor,
+      })
     } finally {
       runtime.metrics.observeDatabase(
         'feed',
@@ -164,26 +127,36 @@ export const defineSqlFeed = <
       )
     }
 
-    if (mode === 'metadata') {
-      const rows = result.rows.map((row) => definition.mapRow(row, 'metadata'))
-      return finishPage(rows, normalized, fetchLimit)
+    if (selected.items.length > normalized.limit) {
+      throw new Error(
+        `Feed query for ${definition.id} selected ${String(selected.items.length)} items for a page limit of ${String(normalized.limit)}; apply the page limit when selecting items.`,
+      )
     }
+    runtime.metrics.observeResult(
+      selected.items.map(({ item }) => feedItemKind(item)),
+    )
 
-    const rows = result.rows.map((row) => {
-      const mapped = definition.mapRow(row, 'with-source')
-      if (!hasSourceValue(mapped)) {
-        throw new Error(
-          `Feed row mapper for ${definition.id} returned metadata without sourceValue in with-source mode; return the exact selected source or reject the row.`,
-        )
-      }
-      return mapped
-    })
-    return finishPage(rows, normalized, fetchLimit)
+    const last = selected.items.at(-1)
+    return {
+      items: selected.items.map(({ item }) => item),
+      ...(selected.hasNext && last
+        ? {
+            cursor: encodeCursor(
+              definition.id,
+              last.position,
+              definition.cursor,
+            ),
+          }
+        : {}),
+    }
   }
 
   return {
     id: definition.id,
     paramsType: definition.params.type,
+    ...(definition.params.default === undefined
+      ? {}
+      : { defaultParams: definition.params.default }),
     loadPage,
   }
 }

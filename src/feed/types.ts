@@ -1,71 +1,52 @@
-/** Organization quality categories understood by the Certified Orglabeler policy. */
-export const ORGANIZATION_QUALITIES = [
-  'high-quality',
-  'standard',
-  'draft',
-  'likely-test',
+/** Identifier of the GainForest activity feed algorithm. */
+export const ACTIVITY_FEED_ID = 'app.gainforest.feed.defs#activityFeed' as const
+
+/** Open-union discriminator for the activity feed's parameters. */
+export const ACTIVITY_FEED_PARAMS_TYPE =
+  'app.gainforest.feed.defs#activityFeedParams' as const
+
+/** Values accepted by the activity feed's `filter` parameter. */
+export const ACTIVITY_FILTERS = [
+  'all',
+  'project',
+  'observation',
+  'organization',
+  'post',
+  'audio',
 ] as const
 
-/** A quality category that a trusted Orglabeler can assign to an organization. */
-export type OrganizationQuality = (typeof ORGANIZATION_QUALITIES)[number]
+/** Which kind of activity the feed includes. */
+export type ActivityFilter = (typeof ACTIVITY_FILTERS)[number]
 
-/** Collections that can produce events in the Hypercerts feed. */
-export const FEED_COLLECTIONS = [
-  'org.hypercerts.claim.activity',
-  'org.hypercerts.collection',
-  'org.hypercerts.context.evaluation',
-  'org.hypercerts.context.measurement',
-  'org.hypercerts.context.attachment',
-  'app.certified.badge.award',
+/** Kinds of record that become a single `recordItem`. */
+export const RECORD_ITEM_KINDS = [
+  'project',
+  'observation',
+  'organization',
+  'post',
 ] as const
 
-/** Final event classifications exposed by the Hypercerts hydrated view. */
-export const FEED_KINDS = [
-  'cert.create',
-  'collection.create',
-  'project.created_with_cert',
-  'evaluation.create',
-  'measurement.create',
-  'update.create',
-  'endorsement.award',
-] as const
+/** Which kind of record a `recordItem` points at. */
+export type RecordItemKind = (typeof RECORD_ITEM_KINDS)[number]
 
-/** A supported interpretation of an indexed source record. */
-export type FeedKind = (typeof FEED_KINDS)[number]
+/** Wire discriminators for the feed item union. */
+export const RECORD_ITEM_TYPE = 'app.gainforest.feed.defs#recordItem' as const
+export const REPOST_ITEM_TYPE = 'app.gainforest.feed.defs#repostItem' as const
+export const BURST_ITEM_TYPE = 'app.gainforest.feed.defs#burstItem' as const
+export const AUDIO_ITEM_TYPE = 'app.gainforest.feed.defs#audioItem' as const
 
-/** Account-quality rules applied to known organizations before selecting events. */
-export interface OrganizationQualityPolicy {
-  /** Quality categories that are allowed to remain in the author scope. */
-  readonly allowed: readonly OrganizationQuality[]
-  /** Whether a known organization without an active trusted label qualifies. */
-  readonly includeUnrated: boolean
-}
+/** Bounded metric label for one feed item. */
+export type FeedItemKind = RecordItemKind | 'repost' | 'burst' | 'audio'
 
-/** Identifier of the Hypercerts viewer-scope feed algorithm. */
-export const HYPERCERTS_FEED_ID =
-  'org.hypercerts.feed.defs#hypercertsFeed' as const
-
-/** Open-union discriminator for the Hypercerts feed's parameters. */
-export const HYPERCERTS_FEED_PARAMS_TYPE =
-  'org.hypercerts.feed.defs#hypercertsFeedParams' as const
-
-/** Raw organization-quality policy accepted before semantic value checks. */
-export interface OrganizationQualityPolicyInput {
-  readonly allowed: readonly string[]
-  readonly includeUnrated: boolean
-}
-
-/** Parameters accepted by the Hypercerts viewer-scope feed algorithm. */
-export interface HypercertsFeedParams {
-  readonly $type: typeof HYPERCERTS_FEED_PARAMS_TYPE
-  /** Viewer whose current Certified outbound follows supply the base scope. */
+/** Parameters accepted by the activity feed. */
+export interface ActivityFeedParams {
+  readonly $type: typeof ACTIVITY_FEED_PARAMS_TYPE
+  /** Which kind of activity to include; omitted means `all`. */
+  readonly filter?: string
+  /** Viewer whose follows scope the feed when `following` is true. */
   readonly viewerDid?: string
-  /** Evaluators whose active endorsement subjects are added to the base scope. */
-  readonly trustedEvaluators?: readonly string[]
-  /** Optional organization-quality membership policy. */
-  readonly organizationQuality?: OrganizationQualityPolicyInput
-  /** Final event-kind filter; omitted or empty means every supported kind. */
-  readonly kinds?: readonly string[]
+  /** Limit the feed to accounts the viewer follows. */
+  readonly following?: boolean
 }
 
 /** Discriminator retained when the public open union receives an unknown variant. */
@@ -75,10 +56,10 @@ export interface UnknownFeedParams {
 }
 
 /** Parameters for any feed algorithm accepted by the public open union. */
-export type FeedParams = HypercertsFeedParams | UnknownFeedParams
+export type FeedParams = ActivityFeedParams | UnknownFeedParams
 
-/** Raw request body shared by the skeleton and hydrated feed procedures. */
-export interface GetFeedSkeletonInput {
+/** Raw request body shared by both feed procedures. */
+export interface FeedRequest {
   /** Identifier used to select the feed algorithm. */
   readonly feedId: string
   /** Optional algorithm-specific parameters selected by their discriminator. */
@@ -89,13 +70,77 @@ export interface GetFeedSkeletonInput {
   readonly cursor?: string
 }
 
-/** One unhydrated record selected for the feed. */
-export interface FeedSkeletonItem {
-  /** AT-URI of the record that the downstream data plane should hydrate. */
+/** A reference to one project, observation, organization, or post record. */
+export interface RecordItem {
+  readonly $type: typeof RECORD_ITEM_TYPE
+  readonly kind: RecordItemKind
+  readonly uri: string
+  /** Omitted when Hyperindex has not stored a CID for the record. */
+  readonly cid?: string
+  readonly did: string
+  readonly createdAt: string
+}
+
+/** A reference to one repost record and the record it reposts. */
+export interface RepostItem {
+  readonly $type: typeof REPOST_ITEM_TYPE
+  readonly uri: string
+  /** Omitted when Hyperindex has not stored a CID for the repost. */
+  readonly cid?: string
+  readonly did: string
+  readonly createdAt: string
+  /** AT-URI of the reposted record. */
   readonly subject: string
 }
 
-/** Public response body from org.hypercerts.feed.getFeedSkeleton. */
+/** A run of observations by one account that are adjacent in the feed. */
+export interface BurstItem {
+  readonly $type: typeof BURST_ITEM_TYPE
+  readonly did: string
+  /** Exact number of observations in the run. */
+  readonly total: number
+  /** createdAt of the oldest observation in the run. */
+  readonly from: string
+  /** createdAt of the newest observation in the run. */
+  readonly to: string
+  /** Up to 20 observation URIs, newest first. */
+  readonly subjects: readonly string[]
+}
+
+/** The recordings one account uploaded into one folder on one UTC day. */
+export interface AudioItem {
+  readonly $type: typeof AUDIO_ITEM_TYPE
+  readonly did: string
+  /** UTC day, formatted YYYY-MM-DD. */
+  readonly day: string
+  /** AT-URI of the recorder folder, when the recordings belong to one. */
+  readonly deployment?: string
+  /** Exact number of recordings in the group. */
+  readonly total: number
+  /** createdAt of the newest recording in the group. */
+  readonly createdAt: string
+  /** Up to 20 recording URIs, newest first. */
+  readonly subjects: readonly string[]
+}
+
+/** One entry of the activity feed: references and selection metadata, never records. */
+export type ActivityFeedItem = RecordItem | RepostItem | BurstItem | AudioItem
+
+/** Public response body from app.gainforest.feed.getFeed. */
+export interface GetFeedOutput {
+  /** Ordered feed items for the current page. */
+  readonly feed: readonly ActivityFeedItem[]
+  /** Opaque cursor for a possible later page; absent at the known end. */
+  readonly cursor?: string
+}
+
+/** One unhydrated record selected for the feed. */
+export interface FeedSkeletonItem {
+  /** AT-URI of the record that the caller should hydrate. */
+  readonly subject: string
+}
+
+/** Public response body from app.gainforest.feed.getFeedSkeleton. */
 export interface GetFeedSkeletonOutput {
   /** Ordered, unhydrated feed records for the current page. */
   readonly feed: readonly FeedSkeletonItem[]
@@ -103,18 +148,16 @@ export interface GetFeedSkeletonOutput {
   readonly cursor?: string
 }
 
-/** Fully validated and deduplicated request passed to the SQL adapter. */
-export interface NormalizedFeedRequest {
-  /** Validated viewer DID whose current Certified follows supply the base scope. */
-  readonly viewerDid: string
-  /** Deduplicated evaluator DIDs. */
-  readonly trustedEvaluators: readonly string[]
-  /** Optional validated account-quality policy. */
-  readonly organizationQuality?: OrganizationQualityPolicy
+/** Fully validated request passed to the SQL adapter. */
+export interface NormalizedActivityRequest {
+  /** Which kind of activity to include. */
+  readonly filter: ActivityFilter
+  /** Viewer whose follows scope the feed; present only when `following` is true. */
+  readonly viewerDid?: string
+  /** Whether the feed is limited to accounts the viewer follows. */
+  readonly following: boolean
   /** Page size in the inclusive range 1..50. */
   readonly limit: number
-  /** Deduplicated final event kinds, empty to select every supported kind. */
-  readonly kinds: readonly FeedKind[]
   /** Raw cursor supplied by the caller, if any. */
   readonly cursor?: string
 }

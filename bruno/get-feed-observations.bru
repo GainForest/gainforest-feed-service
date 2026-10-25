@@ -1,11 +1,11 @@
 meta {
-  name: Hydrated feed
+  name: Feed - observations only
   type: http
   seq: 4
 }
 
 post {
-  url: {{baseUrl}}/xrpc/org.hypercerts.feed.getFeed
+  url: {{baseUrl}}/xrpc/app.gainforest.feed.getFeed
   body: json
   auth: none
 }
@@ -19,7 +19,7 @@ body:json {
     "feedId": "{{feedId}}",
     "params": {
       "$type": "{{feedParamsType}}",
-      "viewerDid": "{{viewerDid}}"
+      "filter": "observation"
     },
     "limit": {{limit}},
     "cursor": "{{cursor}}"

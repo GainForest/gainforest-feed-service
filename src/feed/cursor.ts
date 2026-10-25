@@ -15,7 +15,7 @@ export interface CursorCodec<Cursor, Row> {
   encode(row: Row): unknown
 }
 
-/** Decoded timestamp-and-URI position used by the current Hypercerts feed. */
+/** Decoded feed position: the last row the previous page consumed. */
 export interface FeedCursor {
   readonly value: string
   readonly uri: string

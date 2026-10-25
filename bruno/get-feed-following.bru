@@ -1,11 +1,11 @@
 meta {
-  name: Collections and endorsements
+  name: Feed - following (all parameters)
   type: http
-  seq: 6
+  seq: 5
 }
 
 post {
-  url: {{baseUrl}}/xrpc/org.hypercerts.feed.getFeed
+  url: {{baseUrl}}/xrpc/app.gainforest.feed.getFeed
   body: json
   auth: none
 }
@@ -19,8 +19,9 @@ body:json {
     "feedId": "{{feedId}}",
     "params": {
       "$type": "{{feedParamsType}}",
-      "viewerDid": "{{viewerDid}}",
-      "kinds": ["collection.create", "endorsement.award"]
+      "filter": "all",
+      "following": true,
+      "viewerDid": "{{viewerDid}}"
     },
     "limit": {{limit}},
     "cursor": "{{cursor}}"

@@ -1,18 +1,20 @@
-# Hypercerts Feed Service
+# GainForest Feed Service
 
-A standalone, read-only TypeScript service. It reads current HappyView PostgreSQL data and serves ordered Hypercerts feeds over XRPC.
+A standalone, read-only TypeScript service. It reads current [Hyperindex](https://github.com/GainForest/hyperindex) PostgreSQL data and serves the GainForest activity feed over XRPC.
 
-HappyView owns the PostgreSQL tables. The service provides a URI-only skeleton and a hydrated feed with generic entries and feed-specific views. It does not ingest or change indexed data, call HappyView APIs, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication; it never trusts a body viewer over the verified issuer.
+**`getFeed` returns references and selection metadata, not records.** Each feed item names records by AT-URI and CID, and adds the account, timestamps, and group counts the service decided. It carries no titles, text, images, or profile data. GainForest hydrates the referenced records itself, through Hyperindex's GraphQL API.
+
+Hyperindex owns the PostgreSQL tables. The service does not ingest or change indexed data, call Hyperindex, PDS, or AppView APIs, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication; it never trusts a body viewer over the verified issuer.
 
 ## Endpoints
 
-`GET /` returns a small JSON description of the service and lists its public XRPC procedures. It does not query the database or report service readiness. For a hostname-level `did:web` configured as `SERVICE_DID`, `GET /.well-known/did.json` publishes a DID document with a `#hypercerts_feed` service entry (`HypercertsFeedService`) pointing to the HTTPS origin derived from that DID. The route uses the configured DID, not the request hostname. Non-`did:web` service DIDs do not publish a document here.
+`GET /` returns a small JSON description of the service and lists its public XRPC procedures. It does not query the database or report service readiness. For a hostname-level `did:web` configured as `SERVICE_DID`, `GET /.well-known/did.json` publishes a DID document with a `#gainforest_feed` service entry (`GainForestFeedService`) pointing to the HTTPS origin derived from that DID. The route uses the configured DID, not the request hostname. Non-`did:web` service DIDs do not publish a document here.
 
-Both feed endpoints are POST procedures with optional AT Protocol service authentication. They use the same `{ feedId, params?, limit?, cursor? }` request wrapper, feed-scoped cursor contract, and stable public errors. `params` contains only algorithm-specific values; pagination is generic and top-level. The registered Hypercerts feed requires the Hypercerts params object and discriminator. Anonymous requests must include `params.viewerDid`; authenticated callers may omit it, and the verified JWT issuer supplies the viewer. A supplied viewer DID must match the issuer:
+Both feed endpoints are POST procedures with optional AT Protocol service authentication. They use the same `{ feedId, params?, limit?, cursor? }` request wrapper, feed-scoped cursor contract, and stable public errors. `params` contains only algorithm-specific values; pagination is generic and top-level.
 
 ```text
-POST /xrpc/org.hypercerts.feed.getFeedSkeleton
-POST /xrpc/org.hypercerts.feed.getFeed
+POST /xrpc/app.gainforest.feed.getFeed
+POST /xrpc/app.gainforest.feed.getFeedSkeleton
 Content-Type: application/json
 ```
 
@@ -23,90 +25,85 @@ The procedure and JSON-body design is intentional. A Lexicon query cannot have a
 ### Request
 
 ```bash
-curl -sS http://localhost:3000/xrpc/org.hypercerts.feed.getFeed \
+curl -sS http://localhost:3000/xrpc/app.gainforest.feed.getFeed \
   -H 'content-type: application/json' \
   --data '{
-    "feedId": "org.hypercerts.feed.defs#hypercertsFeed",
+    "feedId": "app.gainforest.feed.defs#activityFeed",
     "params": {
-      "$type": "org.hypercerts.feed.defs#hypercertsFeedParams",
-      "viewerDid": "did:plc:ar7c4by46qjdydhdevvrndac",
-      "trustedEvaluators": ["did:plc:ewvi7nxzyoun6zhxrhs64oiz"],
-      "organizationQuality": {
-        "allowed": ["high-quality", "standard"],
-        "includeUnrated": false
-      }
+      "$type": "app.gainforest.feed.defs#activityFeedParams",
+      "filter": "observation"
     },
     "limit": 20
   }'
 ```
 
-Use the same body with `getFeedSkeleton` when another data system needs only ordered source AT-URIs. A service caller may add `-H 'authorization: Bearer <service-auth-jwt>'` and omit `viewerDid`; the token must target the bare DID configured as `SERVICE_DID`, carry the exact endpoint NSID in `lxm`, and be signed by the issuer's `#atproto` key. Invalid supplied authorization returns 401 and is never treated as anonymous. The public params union is open for future feed algorithms, including algorithms that accept no params. This service currently registers only `org.hypercerts.feed.defs#hypercertsFeed` and requires `org.hypercerts.feed.defs#hypercertsFeedParams`; missing params or a mismatched `$type` returns `InvalidRequest`, while an unknown `feedId` returns `UnsupportedFeed`.
+The activity feed (`app.gainforest.feed.defs#activityFeed`) takes `app.gainforest.feed.defs#activityFeedParams`:
 
-### Skeleton response
+| Param       | Default | Meaning                                                                                                                                                                             |
+| ----------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `filter`    | `all`   | `all`, `project`, `observation`, `organization`, `post`, or `audio`. Reposts appear only with `all`.                                                                                |
+| `following` | `false` | Limit the feed to accounts the viewer follows through `app.certified.graph.follow` records. Reposts are scoped to the account that reposted, and audio groups to the group's owner. |
+| `viewerDid` | none    | The viewer whose follows apply. Required for anonymous requests that set `following`.                                                                                               |
+
+The anonymous global feed needs no viewer. A service caller may add `-H 'authorization: Bearer <service-auth-jwt>'`; the token must target the bare DID configured as `SERVICE_DID`, carry the exact endpoint NSID in `lxm`, and be signed by the issuer's `#atproto` key. The verified issuer is then the viewer, and a supplied `viewerDid` must equal it. Invalid supplied authorization returns 401 and is never treated as anonymous.
+
+`params` is optional for this feed. Omitting it means the defaults, `filter` `all` and `following` false, so a request with only a `feedId` returns the global feed. A mismatched `$type` returns `InvalidRequest`, while an unknown `feedId` returns `UnsupportedFeed`. The public params union is open for future feed algorithms.
+
+`limit` counts feed items, from 1 to 50 (default 20). A burst or an audio day is one item. Send a returned cursor back as the top-level request `cursor`, never inside `params`.
+
+### getFeed response
 
 ```json
 {
   "feed": [
     {
-      "subject": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/org.hypercerts.claim.activity/3kpn"
+      "$type": "app.gainforest.feed.defs#recordItem",
+      "kind": "post",
+      "uri": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/app.gainforest.feed.post/3kpn",
+      "cid": "bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u",
+      "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
+      "createdAt": "2026-07-21T10:00:00.000000Z"
+    },
+    {
+      "$type": "app.gainforest.feed.defs#burstItem",
+      "did": "did:plc:ar7c4by46qjdydhdevvrndac",
+      "total": 312,
+      "from": "2026-07-21T07:12:09.114000Z",
+      "to": "2026-07-21T09:48:31.502000Z",
+      "subjects": ["at://did:plc:ar7c4by46qjdydhdevvrndac/app.gainforest.dwc.occurrence/3kpm"]
     }
   ],
-  "cursor": "eyJ2ZXJzaW9uIjoxLCJmZWVkSWQiOiJvcmcuaHlwZXJjZXJ0cy5mZWVkLmRlZnMjaHlwZXJjZXJ0c0ZlZWQiLCJ2YWx1ZSI6eyJ2YWx1ZSI6IjIwMjYtMDctMjFUMTA6MDA6MDAuMDAwMDAwWiIsInVyaSI6ImF0Oi8vZGlkOnBsYzpld3ZpN254enlvdW42emh4cmhzNjRvaXovb3JnLmh5cGVyY2VydHMuY2xhaW0uYWN0aXZpdHkvM2twbiJ9fQ"
+  "cursor": "eyJ2ZXJzaW9uIjoxLCJmZWVkSWQiOi..."
 }
 ```
 
-Each skeleton entry intentionally contains only the source record AT-URI. A downstream hydrator resolves the current indexed record version; the skeleton does not pin hydration to a CID or expose feed-specific classification metadata. Send a returned cursor back as the top-level request `cursor`, never inside algorithm-specific `params`.
+The `feed` array is an open union. Clients must tolerate item types they do not know. The current items are:
 
-### Hydrated response
+- `recordItem`: one `project`, `observation`, `organization`, or `post` record (`kind`, `uri`, `did`, `createdAt`, and the `cid` when Hyperindex has stored one).
+- `repostItem`: an `app.gainforest.feed.repost` record (`uri`, `did`, `createdAt`, and the `cid` when stored) and the AT-URI of the record it reposts (`subject`). The item is ordered by the repost's time.
+- `burstItem`: two or more observations by one account that are adjacent in the feed with no gap over 12 hours. It carries the account (`did`), the exact `total`, the oldest and newest `createdAt` (`from`, `to`), and up to 20 sample observation URIs in `subjects`, newest first. A single observation stays a `recordItem`.
+- `audioItem`: the recordings uploaded into one recorder folder on one UTC day, whoever stored them; a recording without a folder is grouped by its own account. It carries the group's owner (`did`: the account in the folder's AT-URI, or the recording's own account when there is no folder), the `day` (`YYYY-MM-DD`), the optional `deployment` AT-URI of the folder, the exact `total`, the newest recording's `createdAt`, and up to 20 sample recording URIs in `subjects`, newest first.
+
+Items are ordered newest first by the record's own `createdAt`, as Hyperindex materializes it in `record_created_at`, then by URI. A group takes the time of its newest member.
+
+### getFeedSkeleton response
 
 ```json
 {
   "feed": [
-    {
-      "subject": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/org.hypercerts.context.evaluation/3kpn",
-      "view": {
-        "$type": "org.hypercerts.feed.defs#hypercertsFeedView",
-        "kind": "evaluation.create",
-        "actor": {
-          "did": "did:plc:ewvi7nxzyoun6zhxrhs64oiz",
-          "displayName": "Evaluator"
-        },
-        "content": {
-          "$type": "org.hypercerts.feed.defs#evaluationView",
-          "summary": "Strong evidence",
-          "createdAt": "2026-07-21T10:00:00.000Z",
-          "target": {
-            "uri": "at://did:plc:ar7c4by46qjdydhdevvrndac/org.hypercerts.claim.activity/target",
-            "cid": "bafyreifxcn6ts5hr6oequ5w5jyrpwrdl6p5lq46jasnxmcw3h3sme6asru"
-          }
-        }
-      }
-    }
-  ]
+    { "subject": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/app.gainforest.feed.post/3kpn" }
+  ],
+  "cursor": "eyJ2ZXJzaW9uIjoxLCJmZWVkSWQiOi..."
 }
 ```
 
-Every hydrated entry has a generic source `subject` and an open `view` union. The current `hypercertsFeedView` variant owns the Hypercerts event kind, actor, and kind-specific content. Clients must tolerate unknown future feed-view and content variants.
-
-#### What you get
-
-Every hydrated feed entry comes from a valid source record. Each entry has a feed-specific view and kind-specific content.
-
-The service uses a meaningful, valid Certified profile for an actor's display name and avatar. If no such profile is available, the actor is represented by their DID. It does not expose stored handles or fall back to Bluesky profiles.
-
-An evaluation, measurement, or update may point to another record by its exact URI and CID. These targets remain strong references even though the entry's source `subject` is URI-only. The service checks that each target reference is valid.
-
-Clients must accept image and feed formats they do not know. Known images keep their original Hypercerts and AT Protocol formats.
+`getFeedSkeleton` runs the same selection and returns the same cursor as `getFeed`, flattened to AT-URIs in feed order. A repost yields the repost record's URI. A burst or audio day yields its sample URIs. A skeleton page can therefore hold more entries than its `limit`, up to 20 per grouped item.
 
 #### What the service does not do
 
-The service removes invalid feed items and does not replace them. A page may therefore have fewer items than requested, or no items. The cursor still advances past every record the service checked.
+The service never returns record content and never contacts Hyperindex's API, a PDS, or an AppView. Moderation, pins, image URLs, profile data, and read-your-writes stay in the GainForest app.
 
-The response never contains the original source JSON. It also does not say where actor details came from.
-
-The service does not fetch, preview, or expand linked records. It only checks that the link contains a valid URI and CID.
-
-The service does not contact a PDS, AppView, or HappyView API. It does not download or proxy image files.
+The `recordItem` for an organization is every valid `app.certified.actor.organization` record. The app applies its own ledger on top. Donations are not part of this feed.
 
 ## Request flow
 
@@ -115,103 +112,51 @@ sequenceDiagram
     actor Client
     participant HTTP as HTTP App
     participant XRPC as XRPC Handler
-    participant Service as FeedService / HydratedFeedService
+    participant Service as FeedService
     participant Registry as Feed Registry
-    participant Feed as Registered SQL Feed
-    participant Identity as Identity Reader
-    participant DB as HappyView PostgreSQL
+    participant Feed as Activity Feed (SQL)
+    participant DB as Hyperindex PostgreSQL
 
     Client->>HTTP: POST feed procedure + optional Bearer JWT
     HTTP->>XRPC: Bounded, validated JSON
     XRPC->>XRPC: Verify audience, expiry, lxm, #atproto signature
     XRPC->>XRPC: Validate and consume issuer-scoped jti
     XRPC->>Service: Endpoint input + trusted viewer DID
-    Service->>Registry: Load metadata or source-aware page
-    Registry->>Feed: Dispatch feedId, optional params, and pagination
-    Feed->>DB: One normalized HappyView selection statement
-    DB-->>Feed: Scope and limit+1 metadata or exact sources
-    Feed-->>Registry: Selected page and feed-scoped cursor
-    Registry-->>Service: Selected page and cursor
-    alt Hydrated endpoint
-        Service->>Service: Validate sources and omit invalid rows
-        Service->>Identity: Requested actor DIDs when needed
-        Identity->>DB: One Certified-profile batch
-        DB-->>Identity: Current profile contexts
-        Identity-->>Service: Complete DID map
-        Service-->>XRPC: Generic entries, feed-specific views, and selected-page cursor
-    else Skeleton endpoint
-        Service-->>XRPC: URI-only subjects and cursor
-    end
+    Service->>Registry: Load page
+    Registry->>Feed: Dispatch feedId, params, and pagination
+    Feed->>DB: Feed statement (repeated with a wider scan window only when needed)
+    DB-->>Feed: Items, group counts, samples
+    Feed-->>Registry: Selected items and feed-scoped cursor
+    Registry-->>Service: Page
+    Service-->>XRPC: References and metadata (getFeed) or flattened URIs (getFeedSkeleton)
     XRPC-->>HTTP: Procedure response
     HTTP-->>Client: JSON response
 ```
 
 ## Request behavior
 
-- Malformed JSON, missing required params, anonymous requests without `params.viewerDid`, an authenticated supplied viewer mismatch, an invalid nested `viewerDid`, params that do not match the selected feed, or structurally invalid top-level pagination return HTTP 400 with `InvalidRequest`. Semantically invalid selected-feed parameters or pagination beyond that feed's supported range return HTTP 422 with the same generic error name and an actionable message. An unregistered `feedId` returns `UnsupportedFeed`. These never become internal server errors.
+- Malformed JSON, anonymous requests that set `following` without `params.viewerDid`, an authenticated supplied viewer mismatch, an invalid `viewerDid`, params that do not match the selected feed, or structurally invalid top-level pagination return HTTP 400 with `InvalidRequest`. Semantically invalid parameters (an unknown `filter`, a `limit` outside 1 through 50) return HTTP 422 with the same generic error name and an actionable message. An unregistered `feedId` returns `UnsupportedFeed`. These never become internal server errors.
 - A present `Authorization` header is always verified. Malformed, expired, not-yet-valid, wrong-audience, wrong-endpoint, unresolved-issuer, or incorrectly signed service JWTs return HTTP 401; the request is never retried anonymously. DID documents are resolved over bounded HTTPS-only requests with direct public-address pinning; `did:web` redirects and private, loopback, link-local, reserved, and special-use destinations are rejected.
 - Service-auth JWTs must include a signed, non-empty `jti` no larger than 256 UTF-8 bytes. After signature, audience, expiry, and exact endpoint checks succeed, the service accepts each issuer-and-`jti` pair once. A token is consumed before the downstream feed request runs, so retries require a fresh token even when feed generation fails. Replay state is bounded to 512 live entries per verified issuer and 4,096 live entries total, local to the running process, cleared on restart, and not shared between replicas; a full live issuer quota or global store returns HTTP 503 until entries expire. Anonymous requests remain unaffected because they do not use service-auth replay state.
 
 **Accepted pre-launch risk:** Eight verified issuers can each consume 512 live entries and fill the 4,096-entry process-wide store. While it is full, fresh valid tokens from unrelated issuers receive HTTP 503 until entries expire. The per-issuer cap does not prevent this cross-issuer denial of authenticated requests. Keep one-use tokens and fail-closed behavior for now; revisit capacity and abuse controls before relying on authenticated feed availability.
 
-- The base scope always comes from the viewer's current `app.certified.graph.follow` records. The service ignores malformed follow subjects.
-- `trustedEvaluators` adds the subjects of every current, active endorsement award from each evaluator.
-- An endorsement definition with no `allowedIssuers` allows any issuer. When it is present, only its listed issuer DIDs qualify. An empty or malformed value allows no issuers.
-- The service removes the viewer. It does not query actor status; only the current follow, award, and feed records present in HappyView affect selection.
-- The organization-quality rules run against the final combined author list before event selection. Only exact `app.certified.actor.organization/self` records count as organizations.
-- Trusted quality labelers come only from the service configuration. Quality labels are current positive `happyview_labels` rows matched to a bare organization DID. `cts` and `exp` are stored as TEXT and must be complete, finite RFC3339 or legacy PostgreSQL timestamp values; `cts` is validated but not used for ordering, and `exp` is validated before casting. Malformed, date-only, nonfinite, or elapsed values are inactive. HappyView removes a matching row when it receives a negation, and the table has no label CID or history. A row proves only that HappyView currently projects that label, not that every label was ingested. Callers cannot choose label sources.
-- Leaving out `kinds`, or passing an empty list, includes every supported kind. Unknown kinds are rejected as `InvalidRequest`.
+## Selection, ordering, and current-state behavior
 
-Supported event kinds:
+[`docs/database-contract.md`](docs/database-contract.md) is the full contract. In short:
 
-```text
-cert.create
-collection.create
-project.created_with_cert
-evaluation.create
-measurement.create
-update.create
-endorsement.award
-```
-
-Project and activity records are combined before kind filtering and pagination. After a collection is returned as `project.created_with_cert`, its paired activity cannot appear on a later page.
-
-## Ordering and current-state behavior
-
-The order is:
-
-```text
-feed timestamp DESC, record URI DESC
-```
-
-Entries appear newest first using an internal feed timestamp. HappyView stores record JSON and `indexed_at` as TEXT; the query validates JSON and timestamp text before casting, falls back from an invalid or absent `createdAt` to a finite, complete `indexed_at` in RFC3339 or legacy PostgreSQL format, and compares timestamps chronologically rather than lexically. Date-only and nonfinite fallback values are rejected. HappyView's `created_at` is row-ingestion time and is not used for feed ordering. Invalid source JSON does not abort selection; hydration drops an invalid selected source without backfilling. The effective timestamp is not exposed in either response. Pagination moves forward from the last source row chosen before hydration, so removing an invalid hydrated entry does not move the cursor.
+- The feed reads only rows Hyperindex marks `validation_status = 'valid'`, the rows its typed GraphQL collections return. It excludes rows whose `createdAt` Hyperindex could not parse, and rows whose `createdAt` is before 1970 or more than five minutes in the future. `createdAt` is client-declared: a year-10000 record cannot be formatted as a datetime, and a record dated 2099 would otherwise sit at the top of the feed for good.
+- Projects are `org.hypercerts.collection` records typed `project` or `Project`. Observations are `app.gainforest.dwc.occurrence`. Organizations are `app.certified.actor.organization`. Posts are top-level `app.gainforest.feed.post` records without a `community-event` tag. Reposts are `app.gainforest.feed.repost` records whose subject still exists as a valid observation, as a project typed `project` or `Project`, or as a top-level post without a `community-event` tag, owned by another account. Audio is `app.gainforest.ac.audio`.
+- **"Consecutive" means adjacent in the merged feed order.** Any row between two observations ends a burst, whether it is another kind or another account's observation. With the `observation` filter only observations are in the order. This matches how the GainForest app groups rows today, except that a burst needs two observations, where the app currently needs three. Bioacoustic sightings never join a burst.
+- Audio groups follow the app's upload days. A recording that names a recorder folder (`deploymentRef` is an AT-URI) belongs to that folder, and the account in the folder's AT-URI owns the group, whoever stored the recording. A recording without a folder, or whose folder names a handle instead of a DID, belongs to its own account. A group is one owner, one folder (or none), and one UTC day, so two accounts uploading into one folder on one day make one item, and one account can have several audio items on one day. The `following` scope applies to the owner. One deliberate difference from the app: the app takes the day from the first ten characters of the `createdAt` string, while the service uses the UTC day of `record_created_at`. They agree for timestamps written in UTC, which end in `Z`. For a folder whose AT-URI names a handle instead of a DID, the app merges recordings from different repos into one group, while the service keeps one group per recording account.
+- The cursor is unpadded base64url JSON, scoped to the feed. It points at the last row the previous page consumed, which for a burst is its oldest member, so a burst is never split across pages and no row repeats.
+- Results are mutable current state, not a snapshot across requests.
 
 ### Pagination and database reads
 
-**Pages**
-
-- The service checks one extra item to see whether another page exists.
-- The cursor marks the last item selected and is valid only for the `feedId` that issued it.
-- Both endpoints use the same top-level pagination, ordering, and feed-scoped cursor rules.
-- Invalid hydrated entries are removed, not replaced.
-
-**Database work**
-
-- A skeleton page uses one database query.
-- A full feed page also loads actor and profile details when it has valid entries.
-- The service never makes extra queries to fill gaps left by invalid entries.
-
-**Freshness**
-
-Feed entries and their source records are read together. Actor and profile details are loaded afterward, so they may be newer.
-
-Each page is a separate database read. Changes made between requests may appear on later pages.
-
-**Record size**
-
-The service reads at most 51 source records per page. Their total size is not limited, so unusually large records may take longer and use more memory.
-
-Source JSON is never returned.
+- A page is selected by one SQL statement. When a burst or an audio day is longer than the statement's scan window, the statement reports that the page is incomplete and the service repeats it with a wider window, up to 2,097,152 rows, rather than split the group. Most pages need one statement. A run longer than the last window, or a wider window that exceeds the statement timeout, fails the request with `ScanLimitExceeded`.
+- The service never makes extra queries to hydrate or refill items.
+- Each page is a separate database read. Changes made between requests may appear on later pages.
 
 ## Runtime configuration
 
@@ -219,7 +164,7 @@ For local development, copy `.env.example` to `.env`. For deployment, copy its v
 
 | Variable                         | Required |   Default | Purpose                                                                                |
 | -------------------------------- | -------: | --------: | -------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                   |      yes |           | Dedicated read-only Postgres URL for the HappyView database                            |
+| `DATABASE_URL`                   |      yes |           | Dedicated read-only Postgres URL for the Hyperindex database                           |
 | `SERVICE_DID`                    |      yes |           | DID identifying this service and required as the service-auth JWT audience             |
 | `SERVICE_AUTH_MAX_AGE_SECONDS`   |       no |     `300` | Maximum service-auth JWT age; bounded from 1 through 3600 seconds                      |
 | `DID_RESOLUTION_TIMEOUT_MS`      |       no |    `2000` | Total timeout for one HTTPS DID-document resolution; bounded from 100 through 60000 ms |
@@ -234,34 +179,28 @@ For local development, copy `.env.example` to `.env`. For deployment, copy its v
 | `DATABASE_STATEMENT_TIMEOUT_MS`  |       no |    `5000` | PostgreSQL statement timeout                                                           |
 | `REQUEST_TIMEOUT_MS`             |       no |   `10000` | Maximum time allowed to receive an HTTP request; not a handler or database deadline    |
 | `GRACEFUL_SHUTDOWN_MS`           |       no |   `10000` | Shutdown drain timeout                                                                 |
-| `TRUSTED_QUALITY_LABELER_DIDS`   |       no |     empty | Comma-separated labeler DIDs trusted for current HappyView quality-label rows          |
 
-For example, set `SERVICE_DID=did:web:dev.feed.hypercerts.dev` only when `https://dev.feed.hypercerts.dev` routes to this service; clients can discover its XRPC endpoint using `did:web:dev.feed.hypercerts.dev#hypercerts_feed`. This service does not publish a signing key: it verifies callers using their own DID documents. The DID service entry is for discovery and does not change JWT audience validation.
+For example, set `SERVICE_DID=did:web:feed.gainforest.example` only when `https://feed.gainforest.example` routes to this service; clients can discover its XRPC endpoint using `did:web:feed.gainforest.example#gainforest_feed`. This service does not publish a signing key: it verifies callers using their own DID documents. The DID service entry is for discovery and does not change JWT audience validation.
 
-Service-auth audience verification currently accepts only the bare `SERVICE_DID`. [AT Protocol Proposal 0014](https://github.com/bluesky-social/proposals/blob/main/0014-service-auth-revised/README.md) defines the combined `did#serviceId` service reference, but the reference PDS currently emits the bare-DID service-auth audience and `@atproto/lex-server` does not yet support the combined audience form. This is separate from JWT `jti` replay protection, which this service now validates and consumes once per issuer in its bounded process-local replay state. Clients may still use a combined service reference for PDS proxy routing. When upstream support and PDS behavior are ready, update the verifier to accept an explicit allowlist of both audience forms.
-
-If there are no configured trusted labelers, known organizations count as unrated whenever the request includes an organization-quality policy.
+Service-auth audience verification currently accepts only the bare `SERVICE_DID`. [AT Protocol Proposal 0014](https://github.com/bluesky-social/proposals/blob/main/0014-service-auth-revised/README.md) defines the combined `did#serviceId` service reference, but the reference PDS currently emits the bare-DID service-auth audience and `@atproto/lex-server` does not yet support the combined audience form. This is separate from JWT `jti` replay protection, which this service validates and consumes once per issuer in its bounded process-local replay state. Clients may still use a combined service reference for PDS proxy routing. When upstream support and PDS behavior are ready, update the verifier to accept an explicit allowlist of both audience forms.
 
 ## Database access
 
-Use a dedicated login that has only `SELECT` access. The service also sets `default_transaction_read_only=on` for every connection in the pool, but database grants are still the main security boundary.
+Use a dedicated login that has only `SELECT` access to `record`. The service also sets `default_transaction_read_only=on` for every connection in the pool, but database grants are still the main security boundary.
 
 Each service replica has its own limited in-process pool. When planning database connections, allow for `replica count × DATABASE_MAX_CONNECTIONS`. Use an external pooler if many replicas share a PostgreSQL server with few available connections.
 
 Example operator setup:
 
 ```sql
-CREATE ROLE hypercerts_feed_reader LOGIN PASSWORD '<managed-secret>';
-GRANT CONNECT ON DATABASE happyview TO hypercerts_feed_reader;
-GRANT USAGE ON SCHEMA public TO hypercerts_feed_reader;
-GRANT SELECT ON TABLE public.happyview_records, public.happyview_labels
-  TO hypercerts_feed_reader;
-ALTER ROLE hypercerts_feed_reader SET default_transaction_read_only = on;
+CREATE ROLE gainforest_feed_reader LOGIN PASSWORD '<managed-secret>';
+GRANT CONNECT ON DATABASE hyperindex TO gainforest_feed_reader;
+GRANT USAGE ON SCHEMA public TO gainforest_feed_reader;
+GRANT SELECT ON TABLE public.record TO gainforest_feed_reader;
+ALTER ROLE gainforest_feed_reader SET default_transaction_read_only = on;
 ```
 
-The service has no migrations or feed tables of its own. `/ready` checks that the database can be reached, PostgreSQL 16 can safely validate JSON and timestamp text, and the session is read-only. It does not check HappyView tables, labeler subscription health, label completeness, or ingestion freshness. See [`docs/database-contract.md`](docs/database-contract.md) for the runtime schema contract.
-
-Before cutover, grant the service read-only access to `happyview_records` and `happyview_labels`, confirm that trusted labeler subscriptions are configured, and verify the record collections needed by this service are being stored. A present label row proves only that HappyView currently projects that label; it does not prove that every label was ingested.
+The service has no migrations or feed tables of its own. It needs Hyperindex migration 010 (`record_created_at` and its timeline indexes) and migration 012 (`validation_status`). `/ready` checks that the database can be reached, PostgreSQL 16 can safely validate JSON text, the session is read-only, and the role can read the `record` columns the feed uses. It does not check migration history, indexes, or ingestion freshness. See [`docs/database-contract.md`](docs/database-contract.md) for the runtime schema contract, the indexes the feed relies on, and index proposals for the Hyperindex owners.
 
 ## Development
 
@@ -276,37 +215,29 @@ npm run test:unit
 npm run build
 ```
 
-The committed project Lexicons in `lexicons/` define the public wire contract. `lexicons.json` pins active external Lexicon dependencies by AT-URI and CID; it currently includes `com.atproto.repo.strongRef`. The previously installed `app.bsky.actor.profile.json` file is intentionally preserved but is no longer an active dependency or used for identity hydration. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it; `npm run lint` also does so through its `prelint` hook before typed linting. Codegen stages only the standard `org.hypercerts.defs#uri`, `#smallBlob`, `#smallImage`, and `#largeImage` fragments from the pinned `@hypercerts-org/lexicon` package. This keeps the feed from committing duplicate definitions. `npm run lint:fix` applies ESLint autofixes, and `npm run format` formats maintained TypeScript, MJS, Markdown, YAML, project configuration, and project-owned feed Lexicons. Generated and externally pinned Lexicons, the lockfile, and release changelogs are excluded. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
+The committed project Lexicons in `lexicons/` define the public wire contract. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it; `npm run lint` also does so through its `prelint` hook before typed linting. `npm run lint:fix` applies ESLint autofixes, and `npm run format` formats maintained TypeScript, MJS, Markdown, YAML, project configuration, and the project-owned feed Lexicons. Generated output and release changelogs are excluded. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
 
-Check the committed network Lexicons against the manifest with:
-
-```bash
-npx --no-install lex install --ci --lexicons ./lexicons --manifest ./lexicons.json
-```
-
-Run `lex install --update` only when you mean to update those pinned dependencies.
-
-The main feed statement is `src/feed/feed-query.sql`. `src/feed/query.ts` registers its Hypercerts feed definition, while `src/feed/registry.ts` and `src/feed/sql-feed.ts` own dispatch and shared SQL-feed execution policy. During development, the watcher watches the SQL along with the TypeScript source. The build copies it next to `dist/feed/query.js` before checking that the production adapters load.
+The feed statement is `src/feed/feed-query.sql`. `src/feed/query.ts` registers the activity feed and repeats the statement with a wider scan window when it reports an incomplete page, while `src/feed/registry.ts` and `src/feed/sql-feed.ts` own dispatch and shared SQL-feed policy. During development, the watcher watches the SQL along with the TypeScript source. The build copies it next to `dist/feed/query.js` before checking that the production adapters load.
 
 ### PostgreSQL integration tests
 
 Integration tests need a PostgreSQL 16+ database that you explicitly choose and that is empty and safe to discard:
 
 ```bash
-TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/hypercerts_feed_test' \
+TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/gainforest_feed_test' \
   npm run test:integration
 ```
 
-The test suite creates the smallest needed contract tables and test rows. It does not drop or empty existing tables. Never point it at a shared, staging, or production database.
+The suite creates a minimal Hyperindex `record` table if the database has none, copies it into a private schema for each test, and drops that schema afterwards. It does not drop or empty `public.record`. Never point it at a shared, staging, or production database.
 
-To test against HappyView's migrated schema, use a separate disposable database with no application rows:
+To test against Hyperindex's migrated schema, use a separate disposable database with no application rows:
 
 ```bash
-TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/happyview_feed_test' \
-  npm run test:integration:happyview
+TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/hyperindex_feed_test' \
+  npm run test:integration:hyperindex
 ```
 
-This command needs `psql`. It checks the HappyView columns used by the service, then runs the behavior suite, which inserts synthetic feed records and label rows. It does not apply HappyView migrations or prove that real records or labels have been ingested. Do not point it at a shared, staging, or production database. The suite has no supported label-import path; HappyView's label stream uses standard web PKI roots, so a self-signed local mock labeler cannot populate labels through the real subscription.
+This command needs `psql`. It checks the Hyperindex columns and indexes the service uses, then runs the behavior suite, which inserts synthetic records. It does not apply Hyperindex migrations or prove that real records have been ingested.
 
 ## Releases
 
@@ -317,15 +248,14 @@ See [`docs/RELEASING.md`](docs/RELEASING.md) for the contributor and maintainer 
 ## Deployment
 
 ```bash
-docker build -t hypercerts-feed-service .
+docker build -t gainforest-feed-service .
 docker run --rm -p 3000:3000 \
   -e DATABASE_URL='postgresql://...' \
-  -e SERVICE_DID='did:web:feed.example' \
-  -e TRUSTED_QUALITY_LABELER_DIDS='did:plc:ar7c4by46qjdydhdevvrndac' \
-  hypercerts-feed-service
+  -e SERVICE_DID='did:web:feed.gainforest.example' \
+  gainforest-feed-service
 ```
 
-Deploy the service beside HappyView and use private networking for the database.
+Deploy the service beside Hyperindex and use private networking for the database.
 
 To expose metrics, set a private metrics listener separate from the public application port:
 
@@ -334,7 +264,7 @@ METRICS_HOST=0.0.0.0
 METRICS_PORT=3001
 ```
 
-Configure a compatible Prometheus collector to read `http://<private-service-host>:3001/metrics`. The `GET /metrics` response uses Prometheus-compatible exposition format. The listener has no application-level authentication, so do not attach a public domain or TCP proxy to the metrics port. Each replica exposes only its current in-memory registry; the collector owns aggregation, retention, and historical data. When `METRICS_PORT` is unset or empty, the metrics listener is disabled. `/metrics` remains unavailable on the public application port.
+Configure a compatible Prometheus collector to read `http://<private-service-host>:3001/metrics`. The `GET /metrics` response uses Prometheus-compatible exposition format. The listener has no application-level authentication, so do not attach a public domain or TCP proxy to the metrics port. Each replica exposes only its current in-memory registry; the collector owns aggregation, retention, and historical data. When `METRICS_PORT` is unset or empty, the metrics listener is disabled. `/metrics` remains unavailable on the public application port. Metric names keep the `hypercerts_feed_` prefix from the service this one was forked from.
 
 Set per-IP rate limits at the gateway. The first public policy allows 60 feed requests per minute for each client IP, with a burst of 20. When a client exceeds the limit, return HTTP 429 with `Retry-After`. Keep health and readiness private and outside this public limit. Adjust the limits using measured query response time and pool saturation.
 
@@ -342,9 +272,9 @@ The process limits request body size, HTTP request receive time, pool size, conn
 
 ## Operations
 
-- `GET /.well-known/did.json`: serves the configured hostname-level `did:web` identity and `#hypercerts_feed` service entry; its endpoint comes from `SERVICE_DID`, not the request hostname.
+- `GET /.well-known/did.json`: serves the configured hostname-level `did:web` identity and `#gainforest_feed` service entry; its endpoint comes from `SERVICE_DID`, not the request hostname.
 - `GET /health`: checks only whether the process is alive.
-- `GET /ready`: checks current database support and read-only state; the runtime schema contract is documented separately.
+- `GET /ready`: checks current database support, read-only state, and read access to the Hyperindex `record` columns the feed uses; the runtime schema contract is documented separately.
 - Private metrics listener: when `METRICS_PORT` is set, `GET /metrics` exposes this replica's metrics in Prometheus-compatible exposition format on `METRICS_HOST:METRICS_PORT`; all other paths are rejected.
 - `SIGTERM` and `SIGINT`: stop accepting requests, let current work finish, stop the optional metrics listener, and then close the database pool.
 
@@ -354,13 +284,16 @@ Stable public feed errors:
 InvalidRequest
 UnsupportedFeed
 InvalidCursor
+ScanLimitExceeded
 InternalError
 ```
 
 Feed-specific parameter failures use `InvalidRequest`; their message identifies the invalid parameter and how to correct it.
 
+`ScanLimitExceeded` (HTTP 422) means one account's run of observations or recordings is longer than the 2,097,152 rows the service reads, or that reading a wider window of it did not finish within the database statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`, 5 seconds by default; with the default, a very long run usually ends this way). Either way the page cannot be produced without splitting the run. A statement timeout on the first, 512-row window is not a long run but a database problem, and stays `InternalError`. `ScanLimitExceeded` depends on the data, not on the request: retrying the same request fails the same way and repeats the scan, so clients should not retry it. It is an operator signal. The service counts it in `hypercerts_feed_errors_total{error="ScanLimitExceeded"}`; investigate the account's activity.
+
 Public errors never show SQL, database credentials, table contents, internal causes, or stack traces.
 
-## MVP boundaries
+## Boundaries
 
-The service does not ingest data, write records, manage migrations, cache feed results across requests, call HappyView/PDS/AppView APIs, download blobs, hydrate target records, build target previews, recursively hydrate linked records, save preferences, or provide an unchangeable event history. It retains only bounded, process-local replay-protection state through the JWT `jti`; that state is not a feed-result cache. Results show HappyView's current, changeable data and its current freshness.
+The service does not ingest data, write records, manage migrations or indexes, cache feed results across requests, call Hyperindex, PDS, or AppView APIs, download blobs, hydrate records, return display fields, apply moderation or pins, save preferences, or provide an unchangeable event history. It retains only bounded, process-local replay-protection state through the JWT `jti`; that state is not a feed-result cache. Results show Hyperindex's current, changeable data and its current freshness.

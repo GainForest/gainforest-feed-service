@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "name": "Hypercerts Feed Service",
+  "name": "GainForest Feed Service",
   "type": "collection",
   "ignore": ["node_modules", ".git"]
 }

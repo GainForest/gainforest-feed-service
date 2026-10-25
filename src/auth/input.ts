@@ -1,44 +1,41 @@
 import { FeedError, FeedErrorCode } from '../feed/errors.js'
 import {
-  HYPERCERTS_FEED_PARAMS_TYPE,
+  ACTIVITY_FEED_PARAMS_TYPE,
+  type ActivityFeedParams,
   type FeedParams,
-  type HypercertsFeedParams,
-  type GetFeedSkeletonInput,
+  type FeedRequest,
 } from '../feed/types.js'
 import type { ServiceAuthCredentials } from './service-auth.js'
 
+const isActivityFeedParams = (
+  params: FeedParams | undefined,
+): params is ActivityFeedParams => params?.$type === ACTIVITY_FEED_PARAMS_TYPE
+
 /**
  * Applies the verified caller DID to the internal feed request. The body may
- * omit viewerDid only for authenticated requests; a supplied value is checked
- * before it is replaced by the verified identity.
+ * omit viewerDid when the request is authenticated; a supplied value is
+ * checked against the verified identity before it is replaced by it.
+ * Anonymous requests need a viewerDid only when they ask for the following
+ * feed.
  */
-const isHypercertsFeedParams = (
-  params: FeedParams | undefined,
-): params is HypercertsFeedParams =>
-  params?.$type === HYPERCERTS_FEED_PARAMS_TYPE
-
 export const applyAuthenticatedViewer = (
-  input: GetFeedSkeletonInput,
+  input: FeedRequest,
   credentials: ServiceAuthCredentials | undefined,
-): GetFeedSkeletonInput => {
+): FeedRequest => {
   const params = input.params
-  if (!isHypercertsFeedParams(params)) return input
-  const hypercertsParams = params
+  if (!isActivityFeedParams(params)) return input
 
   if (credentials === undefined) {
-    if (hypercertsParams.viewerDid === undefined) {
+    if (params.following === true && params.viewerDid === undefined) {
       throw new FeedError(
         FeedErrorCode.InvalidRequest,
-        'params.viewerDid is required for anonymous requests; provide the viewer DID or send a valid service-auth bearer token and retry.',
+        'params.viewerDid is required for anonymous requests that set following; provide the viewer DID or send a valid service-auth bearer token and retry.',
       )
     }
     return input
   }
 
-  if (
-    hypercertsParams.viewerDid !== undefined &&
-    hypercertsParams.viewerDid !== credentials.did
-  ) {
+  if (params.viewerDid !== undefined && params.viewerDid !== credentials.did) {
     throw new FeedError(
       FeedErrorCode.InvalidRequest,
       'params.viewerDid does not match the authenticated service caller; omit viewerDid or use the authenticated viewer DID and retry.',
@@ -48,7 +45,7 @@ export const applyAuthenticatedViewer = (
   return {
     ...input,
     params: {
-      ...hypercertsParams,
+      ...params,
       viewerDid: credentials.did,
     },
   }

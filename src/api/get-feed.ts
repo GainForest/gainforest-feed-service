@@ -2,15 +2,15 @@ import type { LexRouter } from '@atproto/lex-server'
 import type { Logger } from 'pino'
 
 import type { OptionalServiceAuth } from '../auth/service-auth.js'
-import type { HydratedFeedReader } from '../hydration/service.js'
-import type { GetHydratedFeedOutput } from '../hydration/types.js'
-import getFeed, { $output } from '../lexicons/org/hypercerts/feed/getFeed.js'
+import type { FeedReader } from '../feed/service.js'
+import type { GetFeedOutput } from '../feed/types.js'
+import getFeed, { $output } from '../lexicons/app/gainforest/feed/getFeed.js'
 import { registerFeedProcedure } from './feed-procedure.js'
 
-/** Registers the public view-only hydrated feed procedure on a LexRouter instance. */
+/** Registers the public reference-and-metadata feed procedure on a LexRouter instance. */
 export const registerGetFeed = (
   router: LexRouter,
-  feedService: HydratedFeedReader,
+  feedService: FeedReader,
   logger: Logger,
   auth?: OptionalServiceAuth,
 ): void => {
@@ -20,8 +20,7 @@ export const registerGetFeed = (
     logger,
     auth,
     execute: (input) => feedService.getFeed(input),
-    parseOutput: (output: GetHydratedFeedOutput) =>
-      $output.schema.$parse(output),
-    errorLog: 'hydrated feed generation failed',
+    parseOutput: (output: GetFeedOutput) => $output.schema.$parse(output),
+    errorLog: 'feed generation failed',
   })
 }

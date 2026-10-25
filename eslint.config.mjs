@@ -15,7 +15,7 @@ const unsafeTypeRules = Object.fromEntries(
 const pgRestriction = {
   name: 'pg',
   message:
-    'Import the runtime PostgreSQL client only in src/database.ts. Use type-only imports elsewhere and keep integration-test pools in *.integration.test.ts.',
+    'Import the runtime PostgreSQL client only in src/database.ts. Use type-only imports elsewhere and keep integration-test pools in *.integration.test.ts or test/support.',
   allowTypeImports: true,
 }
 
@@ -26,9 +26,6 @@ export default [
       'coverage/**',
       'dist/**',
       'src/lexicons/**',
-      'lexicons/app/**',
-      'lexicons/com/**',
-      'lexicons.json',
       'CHANGELOG.md',
       '.changeset/CHANGELOG.md',
     ],
@@ -117,7 +114,11 @@ export default [
   },
   {
     files: ['src/**/*.ts', 'test/**/*.ts'],
-    ignores: ['src/database.ts', 'test/**/*.integration.test.ts'],
+    ignores: [
+      'src/database.ts',
+      'test/**/*.integration.test.ts',
+      'test/support/**/*.ts',
+    ],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -157,36 +158,6 @@ export default [
               name: 'prom-client',
               message:
                 'Import prom-client only in src/metrics.ts and expose metrics operations through that adapter.',
-            },
-          ],
-        },
-      ],
-    },
-  },
-  {
-    files: ['src/hydration/service.ts'],
-    rules: {
-      'no-restricted-imports': [
-        'error',
-        {
-          paths: [
-            pgRestriction,
-            {
-              name: 'prom-client',
-              message:
-                'Import prom-client only in src/metrics.ts and expose metrics operations through that adapter.',
-            },
-          ],
-          patterns: [
-            {
-              group: ['../api/*', '../api/**'],
-              message:
-                'Hydration must depend on internal feed contracts, not API handlers or the public feed service.',
-            },
-            {
-              group: ['../feed/service.js'],
-              message:
-                'Hydration must not call the public feed skeleton service; use the internal feed-page contract.',
             },
           ],
         },

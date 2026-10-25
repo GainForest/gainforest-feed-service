@@ -1,10 +1,10 @@
 {
   "lexicon": 1,
-  "id": "org.hypercerts.feed.getFeed",
+  "id": "app.gainforest.feed.getFeed",
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Builds an ordered hydrated feed from current indexed records and identities for the registered feed and parameters selected in the request. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer and may omit params.viewerDid; anonymous requests must provide it.",
+      "description": "Builds an ordered GainForest activity feed from current indexed records for the registered feed and parameters selected in the request. The response contains references and selection metadata only: AT-URIs, CIDs, account DIDs, timestamps, and group counts. It does not contain record content. The caller hydrates the referenced records itself. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer. Anonymous requests that set params.following must provide params.viewerDid. Omitting params selects the global feed.",
       "errors": [
         {
           "name": "InvalidRequest",
@@ -17,6 +17,10 @@
         {
           "name": "InvalidCursor",
           "description": "The cursor is invalid or incompatible with the selected feed."
+        },
+        {
+          "name": "ScanLimitExceeded",
+          "description": "One account's run of observations or recordings is longer than the service reads, or reading it takes longer than the database statement timeout, so this page cannot be produced. Retrying the same request will not help."
         },
         {
           "name": "InternalError",
@@ -32,20 +36,20 @@
             "feedId": {
               "type": "string",
               "maxLength": 512,
-              "knownValues": ["org.hypercerts.feed.defs#hypercertsFeed"],
+              "knownValues": ["app.gainforest.feed.defs#activityFeed"],
               "description": "Identifier of the feed algorithm to execute."
             },
             "params": {
               "type": "union",
               "closed": false,
-              "refs": ["org.hypercerts.feed.defs#hypercertsFeedParams"],
-              "description": "Algorithm-specific parameters. Omit when the selected feed accepts none."
+              "refs": ["app.gainforest.feed.defs#activityFeedParams"],
+              "description": "Algorithm-specific parameters. Optional for app.gainforest.feed.defs#activityFeed: when omitted, its defaults apply (filter all, following false)."
             },
             "limit": {
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
-              "description": "Maximum number of feed subjects to return. The selected feed determines the default and may enforce a lower maximum."
+              "description": "Maximum number of feed items to return. A burst or an audio day is one item. The selected feed determines the default and may enforce a lower maximum."
             },
             "cursor": {
               "type": "string",
@@ -58,15 +62,21 @@
       "output": {
         "encoding": "application/json",
         "schema": {
-          "description": "Returns ordered hydrated feed entries and an optional cursor for the next page.",
+          "description": "Returns ordered feed items and an optional cursor for the next page. Items are references and selection metadata, not records.",
           "type": "object",
           "required": ["feed"],
           "properties": {
             "feed": {
               "type": "array",
               "items": {
-                "type": "ref",
-                "ref": "#feedItem"
+                "type": "union",
+                "closed": false,
+                "refs": [
+                  "app.gainforest.feed.defs#recordItem",
+                  "app.gainforest.feed.defs#repostItem",
+                  "app.gainforest.feed.defs#burstItem",
+                  "app.gainforest.feed.defs#audioItem"
+                ]
               }
             },
             "cursor": {
@@ -75,24 +85,6 @@
               "description": "Cursor for the next page. Omitted when no later page is known."
             }
           }
-        }
-      }
-    },
-    "feedItem": {
-      "type": "object",
-      "required": ["subject", "view"],
-      "description": "One record selected for the feed together with its hydrated feed-specific representation.",
-      "properties": {
-        "subject": {
-          "type": "string",
-          "format": "at-uri",
-          "description": "AT-URI of the source record represented by this entry."
-        },
-        "view": {
-          "type": "union",
-          "closed": false,
-          "refs": ["org.hypercerts.feed.defs#hypercertsFeedView"],
-          "description": "Hydrated representation produced by the selected feed."
         }
       }
     }

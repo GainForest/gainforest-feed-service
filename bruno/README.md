@@ -1,10 +1,7 @@
 # Bruno collection
 
-Open this directory as a collection in [Bruno](https://www.usebruno.com/), then select an environment:
+Open this directory as a collection in [Bruno](https://www.usebruno.com/), then select the `local` environment, which targets a service running on `http://localhost:3000`. Add an environment with its own `baseUrl` to target a deployed service.
 
-- `prod` uses `https://feed.hypercerts.dev`.
-- `staging` uses the planned `https://dev.feed.hypercerts.dev` domain. Requests will fail until that domain is configured.
+The environment defaults to a page limit of 10 and a sample `viewerDid`. Override `viewerDid`, `limit`, or `cursor` in Bruno when testing another viewer or page. Leave `cursor` empty for the first page, then paste a cursor returned by the service to load the next page.
 
-Both environments default to the public `kzoeps.com` viewer DID and a page limit of 10. Override `viewerDid`, `limit`, or `cursor` in Bruno when testing another viewer scope or page. Leave `cursor` empty for the first page, then paste a cursor returned by the service to load the next page.
-
-The collection contains read-only health, readiness, skeleton, hydrated-feed, and basic kind-filter requests. **Hydrated feed — all parameters** shows every currently supported request field in one place. Feed requests are unauthenticated and do not modify records.
+The collection contains read-only health, readiness, feed, observations-only, following, and skeleton requests. The feed requests return references and selection metadata, not records. **Feed - following** shows every request parameter in one place. Feed requests are unauthenticated and do not modify records.

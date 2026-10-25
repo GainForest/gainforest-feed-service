@@ -16,14 +16,14 @@ import {
   type OptionalServiceAuth,
   type ServiceAuthCredentials,
 } from '../src/auth/service-auth.js'
-import { main as hydratedMethod } from '../src/lexicons/org/hypercerts/feed/getFeed.defs.js'
-import { main as skeletonMethod } from '../src/lexicons/org/hypercerts/feed/getFeedSkeleton.defs.js'
+import { main as feedMethod } from '../src/lexicons/app/gainforest/feed/getFeed.defs.js'
+import { main as skeletonMethod } from '../src/lexicons/app/gainforest/feed/getFeedSkeleton.defs.js'
 
 const issuerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const otherIssuerDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
 const serviceDid = 'did:web:feed.example'
-const skeletonNsid = 'org.hypercerts.feed.getFeedSkeleton'
-const hydratedNsid = 'org.hypercerts.feed.getFeed'
+const skeletonNsid = 'app.gainforest.feed.getFeedSkeleton'
+const feedNsid = 'app.gainforest.feed.getFeed'
 const baseTimeMs = 1_700_000_000_000
 
 let nextJti = 0
@@ -123,7 +123,7 @@ const authContext = (
   nsid = skeletonNsid,
 ): Parameters<OptionalServiceAuth>[0] => ({
   request: authRequest(authorization),
-  method: nsid === hydratedNsid ? hydratedMethod : skeletonMethod,
+  method: nsid === feedNsid ? feedMethod : skeletonMethod,
   params: {},
 })
 
@@ -195,7 +195,7 @@ describe('optional AT Protocol service authentication', () => {
     ],
     [
       'wrong lxm',
-      async (keypair: P256Keypair) => signedJwt(keypair, { lxm: hydratedNsid }),
+      async (keypair: P256Keypair) => signedJwt(keypair, { lxm: feedNsid }),
     ],
   ])('rejects %s without anonymous fallback', async (_label, makeToken) => {
     const keypair = await P256Keypair.create()
@@ -409,7 +409,7 @@ describe('optional AT Protocol service authentication', () => {
 
   it.each([
     ['missing', undefined],
-    ['wrong', hydratedNsid],
+    ['wrong', feedNsid],
   ])('does not let a %s lxm consume a valid token jti', async (_label, lxm) => {
     const keypair = await P256Keypair.create()
     const auth = createOptionalServiceAuth({
@@ -432,7 +432,7 @@ describe('optional AT Protocol service authentication', () => {
     })
   })
 
-  it('shares replay state between the skeleton and hydrated endpoints', async () => {
+  it('shares replay state between the skeleton and feed endpoints', async () => {
     const keypair = await P256Keypair.create()
     const auth = createOptionalServiceAuth({
       audience: serviceDid,
@@ -442,16 +442,16 @@ describe('optional AT Protocol service authentication', () => {
       jti: 'both-endpoints-jti',
       lxm: skeletonNsid,
     })
-    const hydratedToken = await signedJwt(keypair, {
+    const feedToken = await signedJwt(keypair, {
       jti: 'both-endpoints-jti',
-      lxm: hydratedNsid,
+      lxm: feedNsid,
     })
 
     await expect(
       auth(authContext(`Bearer ${skeletonToken}`, skeletonNsid)),
     ).resolves.toBeDefined()
     await expect(
-      auth(authContext(`Bearer ${hydratedToken}`, hydratedNsid)),
+      auth(authContext(`Bearer ${feedToken}`, feedNsid)),
     ).rejects.toMatchObject({
       wwwAuthenticate: { Bearer: { error: 'NonceNotUnique' } },
     })

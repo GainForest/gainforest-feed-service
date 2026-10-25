@@ -1,113 +1,85 @@
 import { describe, expect, it } from 'vitest'
 
-import { type FeedError, FeedErrorCode } from '../src/feed/errors.js'
-import type { HypercertsFeedParams } from '../src/feed/types.js'
-import { normalizeFeedRequest } from '../src/feed/validation.js'
+import { FeedErrorCode } from '../src/feed/errors.js'
+import {
+  ACTIVITY_FEED_PARAMS_TYPE,
+  type ActivityFeedParams,
+} from '../src/feed/types.js'
+import { normalizeActivityRequest } from '../src/feed/validation.js'
 
-const paramsType = 'org.hypercerts.feed.defs#hypercertsFeedParams'
-const viewer = 'did:plc:ar7c4by46qjdydhdevvrndac'
+const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 
-const feedParams = (
-  params: Omit<HypercertsFeedParams, '$type'>,
-): HypercertsFeedParams => ({ $type: paramsType, ...params })
+const params = (
+  overrides: Partial<ActivityFeedParams> = {},
+): ActivityFeedParams => ({
+  $type: ACTIVITY_FEED_PARAMS_TYPE,
+  ...overrides,
+})
 
-describe('feed request validation', () => {
-  it('normalizes the viewer-follow request defaults', () => {
-    expect(
-      normalizeFeedRequest(feedParams({ viewerDid: viewer })),
-    ).toMatchObject({
-      viewerDid: viewer,
-      trustedEvaluators: [],
-      kinds: [],
+const thrownBy = (action: () => unknown): unknown => {
+  try {
+    action()
+  } catch (error) {
+    return error
+  }
+  return undefined
+}
+
+describe('normalizeActivityRequest', () => {
+  it('defaults to the unscoped feed of every kind', () => {
+    expect(normalizeActivityRequest(params())).toEqual({
+      filter: 'all',
+      following: false,
       limit: 20,
     })
   })
 
-  it('deduplicates evaluator DIDs before applying the list limit', () => {
-    const result = normalizeFeedRequest(
-      feedParams({
-        viewerDid: viewer,
-        trustedEvaluators: Array.from({ length: 100 }, () => viewer),
-      }),
-    )
-
-    expect(result.trustedEvaluators).toEqual([viewer])
+  it('accepts every supported filter', () => {
+    for (const filter of [
+      'all',
+      'project',
+      'observation',
+      'organization',
+      'post',
+      'audio',
+    ]) {
+      expect(normalizeActivityRequest(params({ filter })).filter).toBe(filter)
+    }
   })
 
-  it('reports Hypercerts parameter failures through the generic InvalidRequest error', () => {
-    expect(() =>
-      normalizeFeedRequest(
-        feedParams({ viewerDid: viewer, kinds: ['cert.creat'] }),
-      ),
-    ).toThrow(
-      expect.objectContaining<Partial<FeedError>>({
-        code: FeedErrorCode.InvalidRequest,
-        status: 422,
-      }),
-    )
-
-    const trustedEvaluators = Array.from(
-      { length: 65 },
-      (_, index) => `did:plc:${index.toString(36).padStart(24, 'a')}`,
-    )
-    expect(() =>
-      normalizeFeedRequest(
-        feedParams({ viewerDid: viewer, trustedEvaluators }),
-      ),
-    ).toThrow(
-      expect.objectContaining<Partial<FeedError>>({
-        code: FeedErrorCode.InvalidRequest,
-        status: 422,
-      }),
-    )
+  it('keeps the viewer only when the feed is scoped to follows', () => {
+    expect(
+      normalizeActivityRequest(params({ viewerDid, following: true })),
+    ).toEqual({ filter: 'all', following: true, viewerDid, limit: 20 })
+    expect(normalizeActivityRequest(params({ viewerDid }))).toEqual({
+      filter: 'all',
+      following: false,
+      limit: 20,
+    })
   })
 
-  it('rejects empty event kind values', () => {
-    expect(() =>
-      normalizeFeedRequest(feedParams({ viewerDid: viewer, kinds: [''] })),
-    ).toThrow(
-      expect.objectContaining<Partial<FeedError>>({
-        code: FeedErrorCode.InvalidRequest,
-        status: 422,
-      }),
-    )
+  it('passes the cursor and an explicit limit through', () => {
+    expect(
+      normalizeActivityRequest(params(), { limit: 50, cursor: 'opaque' }),
+    ).toMatchObject({ limit: 50, cursor: 'opaque' })
   })
 
-  it.each(['', 'excellent'])(
-    'rejects unsupported organization quality %j',
-    (quality) => {
-      expect(() =>
-        normalizeFeedRequest(
-          feedParams({
-            viewerDid: viewer,
-            organizationQuality: {
-              allowed: [quality],
-              includeUnrated: false,
-            },
-          }),
-        ),
-      ).toThrow(
-        expect.objectContaining<Partial<FeedError>>({
-          code: FeedErrorCode.InvalidRequest,
-        }),
-      )
-    },
-  )
+  it.each([
+    ['an unknown filter', params({ filter: 'donation' }), {}],
+    ['a malformed viewer DID', params({ viewerDid: 'not-a-did' }), {}],
+    ['following without a viewer', params({ following: true }), {}],
+    ['a zero limit', params(), { limit: 0 }],
+    ['a limit above the maximum', params(), { limit: 51 }],
+    ['a fractional limit', params(), { limit: 1.5 }],
+  ])('rejects %s as InvalidRequest with HTTP 422', (_name, input, paging) => {
+    expect(
+      thrownBy(() => normalizeActivityRequest(input, paging)),
+    ).toMatchObject({ code: FeedErrorCode.InvalidRequest, status: 422 })
+  })
 
-  it('rejects malformed viewers and page sizes', () => {
+  it('names the supported filters when rejecting one', () => {
     expect(() =>
-      normalizeFeedRequest(feedParams({ viewerDid: 'alice.test' })),
-    ).toThrow(
-      expect.objectContaining<Partial<FeedError>>({
-        code: FeedErrorCode.InvalidRequest,
-      }),
-    )
-    expect(() =>
-      normalizeFeedRequest(feedParams({ viewerDid: viewer }), { limit: 51 }),
-    ).toThrow(
-      expect.objectContaining<Partial<FeedError>>({
-        code: FeedErrorCode.InvalidRequest,
-      }),
-    )
+      normalizeActivityRequest(params({ filter: 'donation' })),
+    ).toThrow(/all, project, observation, organization, post, audio/)
   })
 })

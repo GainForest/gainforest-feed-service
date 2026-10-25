@@ -7,6 +7,7 @@ import {
 } from 'pg'
 
 import type { Config } from './config.js'
+import { sqlState } from './sql-state.js'
 
 /** Result of checking whether the connected database has the capabilities required by the feed. */
 export interface DatabaseCompatibility {
@@ -37,7 +38,7 @@ export class Database implements DatabaseCompatibilityChecker {
       idleTimeoutMillis: config.databaseIdleTimeoutMs,
       connectionTimeoutMillis: config.databaseConnectionTimeoutMs,
       statement_timeout: config.databaseStatementTimeoutMs,
-      application_name: 'hypercerts-feed-service',
+      application_name: 'gainforest-feed-service',
       options: '-c default_transaction_read_only=on',
     }
     this.#pool = new Pool(poolConfig)
@@ -54,19 +55,17 @@ export class Database implements DatabaseCompatibilityChecker {
     return this.#pool.query<T>(text, [...values])
   }
 
-  /** Verifies database reachability, Postgres 16 JSON/timestamp validation, and read-only session state. */
+  /** Verifies database reachability, Postgres 16 JSON validation, the Hyperindex record columns the feed reads, and read-only session state. */
   async checkCompatibility(): Promise<DatabaseCompatibility> {
     try {
       const capabilities = await this.#pool.query<{
         server_version_num: number
         json_validation: boolean
-        timestamp_validation: boolean
         transaction_read_only: string
       }>(`
         SELECT
           current_setting('server_version_num')::integer AS server_version_num,
           pg_input_is_valid('{"valid":true}', 'jsonb') AS json_validation,
-          pg_input_is_valid('2026-01-01T00:00:00Z', 'timestamp with time zone') AS timestamp_validation,
           current_setting('transaction_read_only') AS transaction_read_only
       `)
       const capability = capabilities.rows[0]
@@ -74,14 +73,14 @@ export class Database implements DatabaseCompatibilityChecker {
         return {
           compatible: false,
           reason:
-            'Postgres 16 or newer is required for safe parsing of HappyView JSON and timestamp text; upgrade the database before starting this service.',
+            'Postgres 16 or newer is required for safe parsing of JSON stored as text inside Hyperindex records; upgrade the database before starting this service.',
         }
       }
-      if (!capability.json_validation || !capability.timestamp_validation) {
+      if (!capability.json_validation) {
         return {
           compatible: false,
           reason:
-            'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
+            'Postgres JSON input validation is unavailable; verify pg_input_is_valid for jsonb before starting this service.',
         }
       }
       if (capability.transaction_read_only !== 'on') {
@@ -91,20 +90,19 @@ export class Database implements DatabaseCompatibilityChecker {
             'The feed database session is not read-only; keep default_transaction_read_only enabled and use a read-only database role.',
         }
       }
+      const schemaProblem = await this.#checkRecordTable()
+      if (schemaProblem !== undefined) {
+        return { compatible: false, reason: schemaProblem }
+      }
 
       return { compatible: true }
     } catch (cause) {
       this.#logger.warn({ err: cause }, 'database readiness check failed')
-      if (
-        typeof cause === 'object' &&
-        cause !== null &&
-        'code' in cause &&
-        cause.code === '42883'
-      ) {
+      if (sqlState(cause) === '42883') {
         return {
           compatible: false,
           reason:
-            'Postgres JSON or timestamp input validation is unavailable; verify pg_input_is_valid for jsonb and timestamp with time zone before starting this service.',
+            'Postgres JSON input validation is unavailable; verify pg_input_is_valid for jsonb before starting this service.',
         }
       }
       return {
@@ -112,6 +110,32 @@ export class Database implements DatabaseCompatibilityChecker {
         reason:
           'Database readiness check failed; verify DATABASE_URL, network access, and database availability.',
       }
+    }
+  }
+
+  /**
+   * Confirms that the feed's role can read the Hyperindex columns the feed
+   * statement uses. Returns an actionable reason when it cannot.
+   */
+  async #checkRecordTable(): Promise<string | undefined> {
+    try {
+      await this.#pool.query(
+        'SELECT uri, cid, did, collection, json, record_created_at, validation_status FROM record WHERE false',
+      )
+      return undefined
+    } catch (cause) {
+      this.#logger.warn({ err: cause }, 'Hyperindex record table check failed')
+      const state = sqlState(cause)
+      if (state === '42P01') {
+        return 'The Hyperindex record table was not found; point DATABASE_URL at the Hyperindex database and make sure its migrations have run (the service needs migrations 010 and 012).'
+      }
+      if (state === '42703') {
+        return 'The Hyperindex record table lacks record_created_at or validation_status; run Hyperindex migrations 010 and 012 before starting this service.'
+      }
+      if (state === '42501') {
+        return 'The feed database role cannot read the Hyperindex record table; grant SELECT on it to the role.'
+      }
+      throw cause
     }
   }
 

@@ -1,25 +1,21 @@
 import { readFileSync } from 'node:fs'
 
-import { jsonToLex } from '@atproto/lex'
 import { describe, expect, it } from 'vitest'
 
 import { FeedErrorCode } from '../src/feed/errors.js'
 import {
-  $input as hydratedInput,
-  $output as hydratedOutput,
-} from '../src/lexicons/org/hypercerts/feed/getFeed.js'
+  $input as feedInput,
+  $output as feedOutput,
+} from '../src/lexicons/app/gainforest/feed/getFeed.js'
 import {
   $input as skeletonInput,
   $output as skeletonOutput,
-} from '../src/lexicons/org/hypercerts/feed/getFeedSkeleton.js'
+} from '../src/lexicons/app/gainforest/feed/getFeedSkeleton.js'
 
 type JsonObject = Record<string, unknown>
 
 const isJsonObject = (value: unknown): value is JsonObject =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const isJsonArray = (value: unknown): value is readonly unknown[] =>
-  Array.isArray(value)
 
 const asJsonObject = (value: unknown): JsonObject => {
   if (!isJsonObject(value)) throw new Error('Expected a Lexicon JSON object')
@@ -37,545 +33,278 @@ const valueAt = (root: JsonObject, ...path: string[]): unknown => {
 const objectAt = (root: JsonObject, ...path: string[]): JsonObject =>
   asJsonObject(valueAt(root, ...path))
 
-const arrayAt = (root: JsonObject, ...path: string[]): readonly unknown[] => {
-  const value = valueAt(root, ...path)
-  if (!isJsonArray(value)) throw new Error('Expected a Lexicon JSON array')
-  return value
-}
-
 const readLexicon = (relativePath: string): JsonObject => {
   const source = readFileSync(
     new URL(`../lexicons/${relativePath}`, import.meta.url),
     'utf8',
   )
-  const value: unknown = JSON.parse(source)
-  if (!isJsonObject(value)) throw new Error('Expected a Lexicon document')
-  return value
+  return asJsonObject(JSON.parse(source))
 }
 
-const skeletonLexicon = readLexicon('org/hypercerts/feed/getFeedSkeleton.json')
-const hydratedLexicon = readLexicon('org/hypercerts/feed/getFeed.json')
-const defsLexicon = readLexicon('org/hypercerts/feed/defs.json')
+const skeletonLexicon = readLexicon('app/gainforest/feed/getFeedSkeleton.json')
+const feedLexicon = readLexicon('app/gainforest/feed/getFeed.json')
+const defsLexicon = readLexicon('app/gainforest/feed/defs.json')
 
 const skeletonMain = objectAt(skeletonLexicon, 'defs', 'main')
-const hydratedMain = objectAt(hydratedLexicon, 'defs', 'main')
+const feedMain = objectAt(feedLexicon, 'defs', 'main')
 const defs = objectAt(defsLexicon, 'defs')
 
 const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const actorDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
-const uri = `at://${actorDid}/org.hypercerts.claim.activity/3kpn`
-const targetUri = `at://${viewerDid}/org.hypercerts.claim.activity/target`
+const at = (collection: string, rkey: string): string =>
+  `at://${actorDid}/${collection}/${rkey}`
 const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
-const blobCid = 'bafkreiehxpuhtr5f6v4eu4byjo2j7kkrhjvd7psmfu4imnpdzb3bdqb7vy'
 const createdAt = '2026-07-21T10:00:00.000Z'
-const feedId = 'org.hypercerts.feed.defs#hypercertsFeed'
-const paramsType = 'org.hypercerts.feed.defs#hypercertsFeedParams'
-const supportedFeedKinds = [
-  'cert.create',
-  'collection.create',
-  'project.created_with_cert',
-  'evaluation.create',
-  'measurement.create',
-  'update.create',
-  'endorsement.award',
-] as const
+const feedId = 'app.gainforest.feed.defs#activityFeed'
+const paramsType = 'app.gainforest.feed.defs#activityFeedParams'
 
 const feedRequest = {
   feedId,
-  params: { $type: paramsType, viewerDid },
+  params: { $type: paramsType, viewerDid, filter: 'post', following: true },
   limit: 20,
   cursor: 'next-page',
 }
 
-const uriImage = {
-  $type: 'org.hypercerts.defs#uri',
-  uri: 'https://example.com/image.png',
-}
-const blobJson = {
-  $type: 'blob',
-  ref: { $link: blobCid },
-  mimeType: 'image/png',
-  size: 128,
-}
-const blob = jsonToLex(blobJson, { strict: true })
-const blobWith = (overrides: JsonObject): JsonObject => ({
-  ...blobJson,
-  ...overrides,
-})
-const smallImage = {
-  $type: 'org.hypercerts.defs#smallImage',
-  image: blob,
-}
-const largeImage = {
-  $type: 'org.hypercerts.defs#largeImage',
-  image: blob,
-}
-const smallBlob = {
-  $type: 'org.hypercerts.defs#smallBlob',
-  blob,
-}
-const actor = {
+const recordItem = {
+  $type: 'app.gainforest.feed.defs#recordItem',
+  kind: 'project',
+  uri: at('org.hypercerts.collection', 'c1'),
+  cid,
   did: actorDid,
-  displayName: 'Actor',
-  avatar: smallImage,
+  createdAt,
 }
-const target = { uri: targetUri, cid }
+const repostItem = {
+  $type: 'app.gainforest.feed.defs#repostItem',
+  uri: at('app.gainforest.feed.repost', 'r1'),
+  cid,
+  did: actorDid,
+  createdAt,
+  subject: at('app.gainforest.feed.post', 'p1'),
+}
+const burstItem = {
+  $type: 'app.gainforest.feed.defs#burstItem',
+  did: actorDid,
+  total: 300,
+  from: '2026-07-21T09:00:00.000Z',
+  to: createdAt,
+  subjects: [at('app.gainforest.dwc.occurrence', 'o1')],
+}
+const audioItem = {
+  $type: 'app.gainforest.feed.defs#audioItem',
+  did: actorDid,
+  day: '2026-07-21',
+  deployment: at('app.gainforest.ac.deployment', 'folder'),
+  total: 40,
+  createdAt,
+  subjects: [at('app.gainforest.ac.audio', 'a1')],
+}
 
-const viewsByKind = {
-  'cert.create': {
-    $type: 'org.hypercerts.feed.defs#activityView',
-    title: 'Restore the watershed',
-    image: uriImage,
-    createdAt,
-    locationCount: 2,
-  },
-  'collection.create': {
-    $type: 'org.hypercerts.feed.defs#collectionView',
-    title: 'Watershed projects',
-    image: largeImage,
-    createdAt,
-    itemCount: 3,
-  },
-  'project.created_with_cert': {
-    $type: 'org.hypercerts.feed.defs#collectionView',
-    title: 'Watershed project',
-    createdAt,
-    itemCount: 1,
-  },
-  'endorsement.award': {
-    $type: 'org.hypercerts.feed.defs#endorsementView',
-    subject: { did: viewerDid },
-    createdAt,
-  },
-  'evaluation.create': {
-    $type: 'org.hypercerts.feed.defs#evaluationView',
-    summary: 'Strong evidence',
-    createdAt,
-    target,
-  },
-  'measurement.create': {
-    $type: 'org.hypercerts.feed.defs#measurementView',
-    metric: 'hectares restored',
-    createdAt,
-    target,
-  },
-  'update.create': {
-    $type: 'org.hypercerts.feed.defs#updateView',
-    title: 'Field report',
-    image: smallBlob,
-    createdAt,
-    target,
-  },
-} as const
-
-const feedItem = (
-  kind: keyof typeof viewsByKind = 'cert.create',
-): JsonObject => ({
-  subject: uri,
-  view: {
-    $type: 'org.hypercerts.feed.defs#hypercertsFeedView',
-    kind,
-    actor,
-    content: viewsByKind[kind],
-  },
-})
-
-const withFeedView = (item: JsonObject, overrides: JsonObject): JsonObject => ({
-  ...item,
-  view: { ...objectAt(item, 'view'), ...overrides },
-})
-
-const withContent = (item: JsonObject, content: JsonObject): JsonObject =>
-  withFeedView(item, { content })
+const parseFeed = (feed: unknown[]) => feedOutput.schema.$parse({ feed })
 
 describe('feed Lexicon contract', () => {
-  it('keeps registered feed inputs and UpperCamelCase public errors identical', () => {
-    expect(valueAt(hydratedMain, 'input')).toEqual(
-      valueAt(skeletonMain, 'input'),
-    )
-    expect(valueAt(hydratedMain, 'input', 'schema', 'required')).toEqual([
-      'feedId',
-    ])
+  it('keeps both procedures on the same input, errors, and request wrapper', () => {
+    for (const field of ['feedId', 'params', 'cursor']) {
+      expect(valueAt(feedMain, 'input', 'schema', 'properties', field)).toEqual(
+        valueAt(skeletonMain, 'input', 'schema', 'properties', field),
+      )
+    }
+    for (const main of [feedMain, skeletonMain]) {
+      expect(
+        valueAt(main, 'input', 'schema', 'properties', 'limit'),
+      ).toMatchObject({ type: 'integer', minimum: 1, maximum: 100 })
+    }
+    expect(valueAt(feedMain, 'errors')).toEqual(valueAt(skeletonMain, 'errors'))
+    expect(valueAt(feedMain, 'input', 'schema', 'required')).toEqual(['feedId'])
     expect(
-      valueAt(hydratedMain, 'input', 'schema', 'properties', 'feedId'),
-    ).toMatchObject({
-      type: 'string',
-      knownValues: [feedId],
-    })
+      valueAt(feedMain, 'input', 'schema', 'properties', 'feedId'),
+    ).toMatchObject({ type: 'string', knownValues: [feedId] })
     expect(
-      valueAt(
-        defs,
-        'hypercertsFeedParams',
-        'properties',
-        'kinds',
-        'items',
-        'knownValues',
-      ),
-    ).toEqual(supportedFeedKinds)
-    expect(
-      valueAt(defs, 'hypercertsFeedView', 'properties', 'kind', 'knownValues'),
-    ).toEqual(supportedFeedKinds)
-    expect(
-      valueAt(hydratedMain, 'input', 'schema', 'properties', 'params'),
-    ).toMatchObject({
-      type: 'union',
-      closed: false,
-      refs: [paramsType],
-    })
-    expect(
-      valueAt(defs, 'hypercertsFeedParams', 'required') ?? [],
-    ).not.toContain('viewerDid')
-    expect(
-      valueAt(hydratedMain, 'input', 'schema', 'properties', 'limit'),
-    ).toMatchObject({
-      type: 'integer',
-      minimum: 1,
-      maximum: 100,
-    })
-    expect(
-      valueAt(hydratedMain, 'input', 'schema', 'properties', 'cursor'),
-    ).toMatchObject({
-      type: 'string',
-      maxLength: 4096,
-    })
-    const paramsProperties = objectAt(
-      defs,
-      'hypercertsFeedParams',
-      'properties',
-    )
-    expect(paramsProperties).not.toHaveProperty('authors')
-    expect(paramsProperties).not.toHaveProperty('limit')
-    expect(paramsProperties).not.toHaveProperty('cursor')
-    expect(valueAt(paramsProperties, 'organizationQuality', 'ref')).toBe(
-      'org.hypercerts.feed.defs#organizationQualityPolicy',
-    )
-    expect(valueAt(hydratedMain, 'errors')).toEqual(
-      valueAt(skeletonMain, 'errors'),
-    )
-    const errorNames = arrayAt(hydratedMain, 'errors').map((error) =>
-      valueAt(asJsonObject(error), 'name'),
-    )
-    expect(errorNames).toEqual([
-      'InvalidRequest',
-      'UnsupportedFeed',
-      'InvalidCursor',
-      'InternalError',
-    ])
-    expect(errorNames).toEqual(Object.values(FeedErrorCode))
+      valueAt(feedMain, 'input', 'schema', 'properties', 'params'),
+    ).toMatchObject({ type: 'union', closed: false, refs: [paramsType] })
 
-    for (const parser of [skeletonInput, hydratedInput]) {
+    const errors = valueAt(feedMain, 'errors')
+    expect(errors).toEqual(
+      Object.values(FeedErrorCode).map(
+        (name) => expect.objectContaining({ name }) as unknown,
+      ),
+    )
+
+    for (const parser of [skeletonInput, feedInput]) {
       expect(() => parser.schema.$parse(feedRequest)).not.toThrow()
       expect(() =>
         parser.schema.$parse({
           feedId: 'app.example.feed.defs#futureFeed',
-          limit: 100,
-          cursor: 'future-page',
-        }),
-      ).not.toThrow()
-      expect(() =>
-        parser.schema.$parse({
-          feedId: 'app.example.feed.defs#futureFeed',
-          params: {
-            $type: 'app.example.feed.defs#futureParams',
-            future: true,
-          },
+          params: { $type: 'app.example.feed.defs#futureParams', future: true },
         }),
       ).not.toThrow()
     }
   })
 
-  it('defines the generic URI-only skeleton wire shape', () => {
-    expect(valueAt(skeletonMain, 'output', 'schema', 'required')).toEqual([
-      'feed',
+  it('defines the activity feed parameters without pagination or author overrides', () => {
+    const properties = objectAt(defs, 'activityFeedParams', 'properties')
+
+    expect(Object.keys(properties).sort()).toEqual([
+      'filter',
+      'following',
+      'viewerDid',
     ])
-    expect(
-      valueAt(skeletonMain, 'output', 'schema', 'properties', 'cursor'),
-    ).toMatchObject({
-      type: 'string',
-      maxLength: 4096,
+    expect(valueAt(properties, 'filter', 'knownValues')).toEqual([
+      'all',
+      'project',
+      'observation',
+      'organization',
+      'post',
+      'audio',
+    ])
+    expect(valueAt(defs, 'activityFeedParams', 'required')).toBeUndefined()
+    for (const main of [feedMain, skeletonMain]) {
+      expect(
+        valueAt(main, 'input', 'schema', 'properties', 'params', 'description'),
+      ).toContain('Optional for app.gainforest.feed.defs#activityFeed')
+      expect(valueAt(main, 'description')).toContain(
+        'Omitting params selects the global feed.',
+      )
+    }
+    expect(valueAt(defs, 'activityFeedParams', 'description')).toContain(
+      'omits params gets the defaults',
+    )
+
+    const parsed = feedInput.schema.$parse({
+      feedId,
+      params: { $type: paramsType },
     })
+    expect(parsed.params).toMatchObject({ filter: 'all', following: false })
+  })
+
+  it('defines the skeleton as URI-only subjects', () => {
     expect(
       valueAt(skeletonLexicon, 'defs', 'feedSkeletonItem', 'required'),
     ).toEqual(['subject'])
     expect(
-      valueAt(skeletonLexicon, 'defs', 'feedSkeletonItem', 'properties'),
-    ).toEqual({
-      subject: {
-        type: 'string',
-        format: 'at-uri',
-        description: 'AT-URI of the record to hydrate.',
-      },
-    })
-    expect(defs).toHaveProperty('organizationQualityPolicy')
-    expect(skeletonLexicon.defs).not.toHaveProperty('organizationQualityPolicy')
-    expect(defs).not.toHaveProperty('feedSkeletonItem')
+      Object.keys(
+        objectAt(skeletonLexicon, 'defs', 'feedSkeletonItem', 'properties'),
+      ),
+    ).toEqual(['subject'])
+    expect(() =>
+      skeletonOutput.schema.$parse({
+        feed: [{ subject: at('app.gainforest.feed.post', 'p1') }],
+        cursor: 'next',
+      }),
+    ).not.toThrow()
+    expect(() =>
+      skeletonOutput.schema.$parse({ feed: [{ subject: 'not-an-at-uri' }] }),
+    ).toThrow()
+  })
 
-    expect(() =>
-      skeletonInput.schema.$parse({
-        feedId,
-        params: {
-          $type: paramsType,
-          viewerDid,
-          organizationQuality: {
-            allowed: ['high-quality'],
-            includeUnrated: false,
-          },
-        },
-      }),
-    ).not.toThrow()
-    expect(() =>
-      skeletonInput.schema.$parse({
-        feedId,
-        params: { $type: paramsType },
-      }),
-    ).not.toThrow()
-    expect(() =>
-      skeletonOutput.schema.$parse({ feed: [{ subject: uri }] }),
-    ).not.toThrow()
+  it('states plainly that getFeed returns references and metadata, not records', () => {
+    for (const description of [
+      valueAt(feedMain, 'description'),
+      valueAt(defsLexicon, 'description'),
+    ]) {
+      expect(description).toEqual(
+        expect.stringMatching(/references and selection metadata/) as unknown,
+      )
+      expect(description).toEqual(expect.stringMatching(/hydrate/) as unknown)
+    }
+    expect(valueAt(feedMain, 'description')).toContain(
+      'It does not contain record content.',
+    )
   })
 
   it('keeps every union in the public feed Lexicons open', () => {
-    for (const lexicon of [skeletonLexicon, hydratedLexicon, defsLexicon]) {
+    for (const lexicon of [skeletonLexicon, feedLexicon, defsLexicon]) {
       expect(JSON.stringify(lexicon)).not.toContain('"closed":true')
     }
-  })
-
-  it('defines a generic hydrated item with a required open feed view', () => {
-    expect(valueAt(hydratedMain, 'output', 'schema', 'required')).toEqual([
-      'feed',
-    ])
     expect(
-      valueAt(hydratedMain, 'output', 'schema', 'properties', 'feed', 'items'),
-    ).toEqual({
-      type: 'ref',
-      ref: '#feedItem',
-    })
-    expect(valueAt(hydratedLexicon, 'defs', 'feedItem', 'required')).toEqual([
-      'subject',
-      'view',
-    ])
-    expect(
-      valueAt(hydratedLexicon, 'defs', 'feedItem', 'properties', 'subject'),
-    ).toMatchObject({
-      type: 'string',
-      format: 'at-uri',
-    })
-    expect(
-      valueAt(hydratedLexicon, 'defs', 'feedItem', 'properties', 'view'),
-    ).toMatchObject({
-      type: 'union',
-      closed: false,
-      refs: ['org.hypercerts.feed.defs#hypercertsFeedView'],
-    })
-    expect(valueAt(defs, 'hypercertsFeedView', 'required')).toEqual([
-      'kind',
-      'actor',
-      'content',
-    ])
-    expect(
-      valueAt(defs, 'hypercertsFeedView', 'properties', 'content'),
+      valueAt(feedMain, 'output', 'schema', 'properties', 'feed', 'items'),
     ).toMatchObject({
       type: 'union',
       closed: false,
       refs: [
-        '#activityView',
-        '#collectionView',
-        '#endorsementView',
-        '#evaluationView',
-        '#measurementView',
-        '#updateView',
+        'app.gainforest.feed.defs#recordItem',
+        'app.gainforest.feed.defs#repostItem',
+        'app.gainforest.feed.defs#burstItem',
+        'app.gainforest.feed.defs#audioItem',
       ],
     })
-    expect(defs).not.toHaveProperty('feedItem')
+  })
 
-    const serialized = JSON.stringify({
-      feedItem: valueAt(hydratedLexicon, 'defs', 'feedItem'),
-      hypercertsFeedView: valueAt(defs, 'hypercertsFeedView'),
-    })
-    for (const forbidden of [
-      'record',
-      'recordState',
-      'profileSource',
-      'actorDid',
-      'feedTimestamp',
-      'notFound',
-      'cidMismatch',
-    ]) {
-      expect(serialized).not.toContain(`"${forbidden}"`)
+  it('adds no display fields to any feed item', () => {
+    const displayFields = [
+      'title',
+      'text',
+      'image',
+      'avatar',
+      'displayName',
+      'handle',
+      'description',
+    ]
+    for (const name of ['recordItem', 'repostItem', 'burstItem', 'audioItem']) {
+      const properties = Object.keys(objectAt(defs, name, 'properties'))
+      for (const field of displayFields) {
+        expect(properties).not.toContain(field)
+      }
     }
   })
 
-  it('keeps activity and collection counts optional on the wire', () => {
-    expect(valueAt(defs, 'activityView', 'required')).toEqual(['title'])
-    expect(valueAt(defs, 'collectionView', 'required')).toEqual(['title'])
-    expect(
-      valueAt(defs, 'activityView', 'properties', 'locationCount'),
-    ).toEqual({
-      type: 'integer',
-      minimum: 0,
-    })
-    expect(valueAt(defs, 'collectionView', 'properties', 'itemCount')).toEqual({
-      type: 'integer',
-      minimum: 0,
+  it('accepts every item variant and the cursor', () => {
+    const parsed = feedOutput.schema.$parse({
+      feed: [recordItem, repostItem, burstItem, audioItem],
+      cursor: 'next',
     })
 
-    const activityWithoutCount: Record<string, unknown> = {
-      ...viewsByKind['cert.create'],
-    }
-    const collectionWithoutCount: Record<string, unknown> = {
-      ...viewsByKind['collection.create'],
-    }
-    delete activityWithoutCount.locationCount
-    delete collectionWithoutCount.itemCount
+    expect(parsed.feed).toHaveLength(4)
+    expect(parsed.cursor).toBe('next')
+  })
 
+  it('accepts record and repost items without a cid', () => {
+    const { cid: _recordCid, ...recordWithoutCid } = recordItem
+    const { cid: _repostCid, ...repostWithoutCid } = repostItem
+
+    expect(() => parseFeed([recordWithoutCid, repostWithoutCid])).not.toThrow()
+  })
+
+  it('accepts an audio group without a recorder folder', () => {
+    const { deployment: _deployment, ...withoutFolder } = audioItem
+
+    expect(() => parseFeed([withoutFolder])).not.toThrow()
+  })
+
+  it('accepts unknown future item variants and unknown record kinds', () => {
     expect(() =>
-      hydratedOutput.schema.$parse({
-        feed: [
-          withContent(feedItem('cert.create'), activityWithoutCount),
-          withContent(feedItem('collection.create'), collectionWithoutCount),
-        ],
-      }),
-    ).not.toThrow()
-  })
-
-  it('uses protocol-native Hypercerts variants through open image unions', () => {
-    expect(defs).not.toHaveProperty('uriImage')
-    expect(defs).not.toHaveProperty('blobImage')
-    expect(
-      Object.keys(objectAt(defs, 'actorSummary', 'properties')).sort(),
-    ).toEqual(['avatar', 'did', 'displayName'])
-    expect(valueAt(defs, 'actorSummary', 'properties', 'avatar')).toEqual({
-      type: 'union',
-      refs: ['org.hypercerts.defs#uri', 'org.hypercerts.defs#smallImage'],
-    })
-    expect(valueAt(defs, 'activityView', 'properties', 'image')).toEqual(
-      valueAt(defs, 'actorSummary', 'properties', 'avatar'),
-    )
-    expect(valueAt(defs, 'collectionView', 'properties', 'image')).toEqual({
-      type: 'union',
-      refs: [
-        'org.hypercerts.defs#uri',
-        'org.hypercerts.defs#smallImage',
-        'org.hypercerts.defs#largeImage',
-      ],
-    })
-    expect(valueAt(defs, 'updateView', 'properties', 'image')).toEqual({
-      type: 'union',
-      refs: ['org.hypercerts.defs#uri', 'org.hypercerts.defs#smallBlob'],
-    })
-  })
-
-  it('uses strong-reference targets only on evaluation, measurement, and update views', () => {
-    for (const name of ['evaluationView', 'measurementView', 'updateView']) {
-      expect(valueAt(defs, name, 'properties', 'target')).toEqual({
-        type: 'ref',
-        ref: 'com.atproto.repo.strongRef',
-      })
-    }
-  })
-
-  it('accepts both image variants and all six views across seven kinds', () => {
-    const items = supportedFeedKinds.map((kind) => feedItem(kind))
-
-    expect(() =>
-      hydratedOutput.schema.$parse({ feed: items, cursor: 'opaque-cursor' }),
-    ).not.toThrow()
-  })
-
-  it('accepts unknown future image and view variants through open unions', () => {
-    const unknownImage = {
-      $type: 'example.feed#unknownImage',
-      uri: 'https://example.com/future-image.png',
-    }
-    expect(() =>
-      hydratedOutput.schema.$parse({
-        feed: [
-          withFeedView(feedItem(), {
-            actor: { did: actorDid, avatar: unknownImage },
-          }),
-          withContent(feedItem(), {
-            ...viewsByKind['cert.create'],
-            image: unknownImage,
-          }),
-          withContent(feedItem(), {
-            $type: 'example.feed#unknownContent',
-          }),
-          {
-            ...feedItem(),
-            view: { $type: 'example.feed#unknownFeedView' },
-          },
-        ],
-      }),
+      parseFeed([
+        { $type: 'app.example.feed.defs#futureItem', future: true },
+        { ...recordItem, kind: 'futureKind' },
+      ]),
     ).not.toThrow()
   })
 
   it.each([
+    ['a record URI that is not an AT-URI', { ...recordItem, uri: 'nope' }],
+    ['a record with a malformed cid', { ...recordItem, cid: 'not-a-cid' }],
+    ['a record owned by a non-DID', { ...recordItem, did: 'alice.test' }],
+    ['a repost without its subject', { ...repostItem, subject: undefined }],
+    ['a burst of one observation', { ...burstItem, total: 1 }],
     [
-      'missing view discriminator',
-      { ...feedItem(), view: { kind: 'cert.create', actor, content: {} } },
+      'a burst with more than 20 samples',
+      {
+        ...burstItem,
+        subjects: Array.from({ length: 21 }, (_, index) =>
+          at('app.gainforest.dwc.occurrence', `o${String(index)}`),
+        ),
+      },
     ],
+    ['a burst without a time range', { ...burstItem, from: undefined }],
     [
-      'missing required view',
-      (() => {
-        const item = feedItem()
-        delete item.view
-        return item
-      })(),
+      'an audio day that is not ten characters',
+      { ...audioItem, day: '2026-7-1' },
     ],
+    ['an audio group with no recordings', { ...audioItem, total: 0 }],
     [
-      'missing image discriminator',
-      withFeedView(feedItem(), {
-        actor: {
-          did: actorDid,
-          avatar: { uri: 'https://example.com/image.png' },
-        },
-      }),
+      'an audio group without its newest time',
+      { ...audioItem, createdAt: undefined },
     ],
-    [
-      'malformed actor DID',
-      withFeedView(feedItem(), { actor: { did: 'not-a-did' } }),
-    ],
-    [
-      'malformed blob CID',
-      withFeedView(feedItem(), {
-        actor: {
-          did: actorDid,
-          avatar: {
-            $type: 'org.hypercerts.defs#smallImage',
-            image: blobWith({ ref: 'not-a-cid' }),
-          },
-        },
-      }),
-    ],
-    [
-      'malformed image URI',
-      withFeedView(feedItem(), {
-        actor: {
-          did: actorDid,
-          avatar: { ...uriImage, uri: 'not a URI' },
-        },
-      }),
-    ],
-    [
-      'negative image size',
-      withFeedView(feedItem(), {
-        actor: {
-          did: actorDid,
-          avatar: {
-            $type: 'org.hypercerts.defs#smallImage',
-            image: blobWith({ size: -1 }),
-          },
-        },
-      }),
-    ],
-    [
-      'malformed target reference',
-      withContent(feedItem('evaluation.create'), {
-        ...viewsByKind['evaluation.create'],
-        target: { uri: 'not-an-at-uri', cid: 'not-a-cid' },
-      }),
-    ],
-  ])('rejects %s', (_label, item) => {
-    expect(() => hydratedOutput.schema.$parse({ feed: [item] })).toThrow()
+  ])('rejects %s', (_name, item) => {
+    expect(() => parseFeed([item])).toThrow()
   })
 })

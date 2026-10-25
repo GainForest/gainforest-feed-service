@@ -7,12 +7,8 @@ const serviceDid = 'did:web:feed.example'
 const validEnvironment = { DATABASE_URL: databaseUrl, SERVICE_DID: serviceDid }
 
 describe('loadConfig', () => {
-  it('loads defaults and deduplicates trusted labelers', () => {
-    const config = loadConfig({
-      ...validEnvironment,
-      TRUSTED_QUALITY_LABELER_DIDS:
-        'did:plc:ar7c4by46qjdydhdevvrndac,did:plc:ar7c4by46qjdydhdevvrndac',
-    })
+  it('loads defaults', () => {
+    const config = loadConfig(validEnvironment)
 
     expect(config.serviceDid).toBe(serviceDid)
     expect(config.serviceAuthMaxAgeSeconds).toBe(300)
@@ -21,9 +17,6 @@ describe('loadConfig', () => {
     expect(config.databaseIdleTimeoutMs).toBe(60_000)
     expect(config.metricsHost).toBe('0.0.0.0')
     expect(config.metricsPort).toBeUndefined()
-    expect(config.trustedQualityLabelerDids).toEqual([
-      'did:plc:ar7c4by46qjdydhdevvrndac',
-    ])
   })
 
   it('loads configured metrics listener settings', () => {

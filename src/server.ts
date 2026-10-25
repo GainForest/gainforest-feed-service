@@ -5,12 +5,10 @@ import { createApp } from './app.js'
 import { createConfiguredServiceAuth } from './auth/service-auth.js'
 import { loadConfig } from './config.js'
 import { Database } from './database.js'
-import { createHypercertsFeed } from './feed/query.js'
+import { createActivityFeed } from './feed/query.js'
 import { FeedRegistry } from './feed/registry.js'
 import { FeedService } from './feed/service.js'
 import { loadLocalEnvironment } from './environment.js'
-import { PostgresIdentityReader } from './hydration/identity.js'
-import { HydratedFeedService } from './hydration/service.js'
 import {
   closeMetricsServer,
   createMetricsServer,
@@ -23,18 +21,13 @@ const config = loadConfig()
 const logger = pino({ level: config.logLevel })
 const metrics = new Metrics()
 const database = new Database(config, logger)
-const hypercertsFeed = createHypercertsFeed(
-  { database, metrics },
-  config.trustedQualityLabelerDids,
-)
-const feeds = new FeedRegistry([hypercertsFeed])
+const activityFeed = createActivityFeed({ database, metrics })
+const feeds = new FeedRegistry([activityFeed])
 const feedService = new FeedService(feeds)
-const identities = new PostgresIdentityReader(database)
-const hydratedFeed = new HydratedFeedService(feeds, identities)
 const auth = createConfiguredServiceAuth(config)
 const app = createApp(
   database,
-  { skeleton: feedService, hydrated: hydratedFeed },
+  { skeleton: feedService, feed: feedService },
   metrics,
   logger,
   auth,
@@ -95,7 +88,7 @@ try {
 }
 logger.info(
   { host: config.host, port: config.port },
-  'Hypercerts feed service is listening',
+  'GainForest feed service is listening',
 )
 
 try {

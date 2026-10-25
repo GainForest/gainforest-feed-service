@@ -1,0 +1,179 @@
+{
+  "lexicon": 1,
+  "id": "app.gainforest.feed.defs",
+  "description": "Shared wire definitions for GainForest activity feed procedures. The feed returns references and selection metadata only. It never returns record content; callers hydrate the referenced records themselves.",
+  "defs": {
+    "activityFeed": {
+      "type": "token",
+      "description": "Identifies the GainForest activity feed algorithm."
+    },
+    "activityFeedParams": {
+      "type": "object",
+      "description": "Parameters accepted by the GainForest activity feed. A request that omits params gets the defaults: filter all and following false. Anonymous requests need no viewer unless following is true, in which case viewerDid is required. Authenticated service requests use the verified issuer as the viewer.",
+      "properties": {
+        "filter": {
+          "type": "string",
+          "maxLength": 64,
+          "knownValues": [
+            "all",
+            "project",
+            "observation",
+            "organization",
+            "post",
+            "audio"
+          ],
+          "default": "all",
+          "description": "Which kind of activity to include. Reposts appear only when the filter is all."
+        },
+        "viewerDid": {
+          "type": "string",
+          "format": "did",
+          "maxLength": 256,
+          "description": "Viewer whose current follows scope the feed when following is true. Required for anonymous requests that set following. When the request is authenticated, it must be omitted or equal the verified issuer."
+        },
+        "following": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, limit the feed to activity by accounts the viewer follows through app.certified.graph.follow records. Reposts are scoped to the account that reposted, and audio groups to the group's owner."
+        }
+      }
+    },
+    "recordItem": {
+      "type": "object",
+      "required": ["kind", "uri", "did", "createdAt"],
+      "description": "Reference to one project, observation, organization, or post record. It carries no record content.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "maxLength": 64,
+          "knownValues": ["project", "observation", "organization", "post"],
+          "description": "Which kind of record the uri points at."
+        },
+        "uri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "AT-URI of the selected record."
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "CID of the selected record version at selection time. Omitted when Hyperindex has not stored one."
+        },
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "Account that owns the record."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "The record's own createdAt, which orders the feed."
+        }
+      }
+    },
+    "repostItem": {
+      "type": "object",
+      "required": ["uri", "did", "createdAt", "subject"],
+      "description": "Reference to an app.gainforest.feed.repost record and the record it reposts. It carries no record content.",
+      "properties": {
+        "uri": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "AT-URI of the repost record."
+        },
+        "cid": {
+          "type": "string",
+          "format": "cid",
+          "description": "CID of the repost record at selection time. Omitted when Hyperindex has not stored one."
+        },
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "Account that reposted."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "The repost's own createdAt, which orders the feed."
+        },
+        "subject": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "AT-URI of the reposted post, observation, or project."
+        }
+      }
+    },
+    "burstItem": {
+      "type": "object",
+      "required": ["did", "total", "from", "to", "subjects"],
+      "description": "A run of two or more observations by one account that are adjacent in the feed with no gap over 12 hours. Only a sample of the run is referenced.",
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "Account that owns every observation in the run."
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "Exact number of observations in the run, which can far exceed the sample."
+        },
+        "from": {
+          "type": "string",
+          "format": "datetime",
+          "description": "createdAt of the oldest observation in the run."
+        },
+        "to": {
+          "type": "string",
+          "format": "datetime",
+          "description": "createdAt of the newest observation in the run. This orders the item in the feed."
+        },
+        "subjects": {
+          "type": "array",
+          "maxLength": 20,
+          "items": { "type": "string", "format": "at-uri" },
+          "description": "AT-URIs of up to 20 observations from the run, newest first."
+        }
+      }
+    },
+    "audioItem": {
+      "type": "object",
+      "required": ["did", "day", "total", "createdAt", "subjects"],
+      "description": "The recordings uploaded into one recorder folder on one UTC day, whoever stored them. A recording without a folder is grouped by its own account. Only a sample of the recordings is referenced.",
+      "properties": {
+        "did": {
+          "type": "string",
+          "format": "did",
+          "description": "Owner of the group: the account in the AT-URI of the recorder folder, or the recording's own account when it has no folder."
+        },
+        "day": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "UTC calendar day of the recordings, formatted YYYY-MM-DD."
+        },
+        "deployment": {
+          "type": "string",
+          "format": "at-uri",
+          "description": "AT-URI of the app.gainforest.ac.deployment folder the recordings belong to. Omitted for recordings without a folder."
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Exact number of recordings uploaded to this folder on this day."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "createdAt of the newest recording in the group. This orders the item in the feed."
+        },
+        "subjects": {
+          "type": "array",
+          "maxLength": 20,
+          "items": { "type": "string", "format": "at-uri" },
+          "description": "AT-URIs of up to 20 recordings from the group, newest first."
+        }
+      }
+    }
+  }
+}

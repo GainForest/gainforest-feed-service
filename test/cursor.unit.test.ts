@@ -7,8 +7,8 @@ import {
 } from '../src/feed/cursor.js'
 import { type FeedError, FeedErrorCode } from '../src/feed/errors.js'
 
-const feedId = 'org.hypercerts.feed.defs#hypercertsFeed'
-const otherFeedId = 'org.hypercerts.feed.defs#otherFeed'
+const feedId = 'app.gainforest.feed.defs#activityFeed'
+const otherFeedId = 'app.gainforest.feed.defs#otherFeed'
 const uri =
   'at://did:plc:ar7c4by46qjdydhdevvrndac/org.hypercerts.claim.activity/3kpn'
 const row = {

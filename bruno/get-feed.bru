@@ -1,11 +1,11 @@
 meta {
-  name: Hypercerts only
+  name: Feed (references and metadata)
   type: http
-  seq: 5
+  seq: 3
 }
 
 post {
-  url: {{baseUrl}}/xrpc/org.hypercerts.feed.getFeed
+  url: {{baseUrl}}/xrpc/app.gainforest.feed.getFeed
   body: json
   auth: none
 }
@@ -18,9 +18,7 @@ body:json {
   {
     "feedId": "{{feedId}}",
     "params": {
-      "$type": "{{feedParamsType}}",
-      "viewerDid": "{{viewerDid}}",
-      "kinds": ["cert.create"]
+      "$type": "{{feedParamsType}}"
     },
     "limit": {{limit}},
     "cursor": "{{cursor}}"
