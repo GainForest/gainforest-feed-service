@@ -93,32 +93,61 @@ export interface RepostItem {
   readonly subject: string
 }
 
+/**
+ * Most rows one burst or audio item covers. A longer run continues in the next
+ * item, so no item, and no page, ever has to read a whole long run.
+ */
+export const MAX_GROUP_ROWS = 200
+
+/** The group fields of a burst or audio item: one chunk of one run. */
+export interface GroupChunk {
+  /**
+   * Opaque identifier of the run. Every chunk of one run carries the same
+   * value and no two runs share one.
+   */
+  readonly groupKey: string
+  /** True for every chunk after the first one of its run. */
+  readonly continued: boolean
+  /** True when this chunk is full and the run goes on in the next item. */
+  readonly capped: boolean
+}
+
 /** A run of observations by one account that are adjacent in the feed. */
-export interface BurstItem {
+export interface BurstItem extends GroupChunk {
   readonly $type: typeof BURST_ITEM_TYPE
   readonly did: string
-  /** Exact number of observations in the run. */
+  /**
+   * Number of observations in this item, at most 200. It is not the size of
+   * the whole run when the run continues in other items.
+   */
   readonly total: number
-  /** createdAt of the oldest observation in the run. */
+  /** createdAt of the oldest observation in this item. */
   readonly from: string
-  /** createdAt of the newest observation in the run. */
+  /** createdAt of the newest observation in this item. */
   readonly to: string
   /** Up to 20 observation URIs, newest first. */
   readonly subjects: readonly string[]
 }
 
-/** The recordings one account uploaded into one folder on one UTC day. */
-export interface AudioItem {
+/** A run of recordings in one recorder folder that are adjacent in the feed. */
+export interface AudioItem extends GroupChunk {
   readonly $type: typeof AUDIO_ITEM_TYPE
+  /** Owner of the folder, or the recording's own account without a folder. */
   readonly did: string
-  /** UTC day, formatted YYYY-MM-DD. */
-  readonly day: string
-  /** AT-URI of the recorder folder, when the recordings belong to one. */
+  /**
+   * AT-URI of the recorder folder, when the recordings belong to one and it
+   * is a valid AT-URI. A `deploymentRef` that is not one is left out.
+   */
   readonly deployment?: string
-  /** Exact number of recordings in the group. */
+  /**
+   * Number of recordings in this item, at most 200. It is not the size of the
+   * whole run when the run continues in other items.
+   */
   readonly total: number
-  /** createdAt of the newest recording in the group. */
-  readonly createdAt: string
+  /** createdAt of the oldest recording in this item. */
+  readonly from: string
+  /** createdAt of the newest recording in this item. */
+  readonly to: string
   /** Up to 20 recording URIs, newest first. */
   readonly subjects: readonly string[]
 }

@@ -549,18 +549,24 @@ describe('HTTP application', () => {
             {
               $type: 'app.gainforest.feed.defs#burstItem' as const,
               did: actor,
-              total: 300,
+              total: 200,
               from: '2026-07-21T09:00:00.000Z',
               to: '2026-07-21T09:30:00.000Z',
               subjects: [`at://${actor}/app.gainforest.dwc.occurrence/o1`],
+              groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
+              continued: false,
+              capped: true,
             },
             {
               $type: 'app.gainforest.feed.defs#audioItem' as const,
               did: actor,
-              day: '2026-07-20',
               total: 12,
-              createdAt: '2026-07-20T23:00:00.000Z',
+              from: '2026-07-20T22:00:00.000Z',
+              to: '2026-07-20T23:00:00.000Z',
               subjects: [`at://${actor}/app.gainforest.ac.audio/a1`],
+              groupKey: 'BBBBBBBBBBBBBBBBBBBBBB',
+              continued: true,
+              capped: false,
             },
           ],
           cursor: 'next',
@@ -596,18 +602,24 @@ describe('HTTP application', () => {
         {
           $type: 'app.gainforest.feed.defs#burstItem',
           did: actor,
-          total: 300,
+          total: 200,
           from: '2026-07-21T09:00:00.000Z',
           to: '2026-07-21T09:30:00.000Z',
           subjects: [`at://${actor}/app.gainforest.dwc.occurrence/o1`],
+          groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
+          continued: false,
+          capped: true,
         },
         {
           $type: 'app.gainforest.feed.defs#audioItem',
           did: actor,
-          day: '2026-07-20',
           total: 12,
-          createdAt: '2026-07-20T23:00:00.000Z',
+          from: '2026-07-20T22:00:00.000Z',
+          to: '2026-07-20T23:00:00.000Z',
           subjects: [`at://${actor}/app.gainforest.ac.audio/a1`],
+          groupKey: 'BBBBBBBBBBBBBBBBBBBBBB',
+          continued: true,
+          capped: false,
         },
       ],
       cursor: 'next',
@@ -1110,39 +1122,6 @@ describe('HTTP application', () => {
       message: 'Reduce trustedEvaluators before retrying.',
     })
     expect(responseText).not.toContain(internalCause.message)
-  })
-
-  it('translates ScanLimitExceeded into a non-retryable 422 with its own metric label', async () => {
-    const getFeed = vi.fn(() =>
-      Promise.reject(
-        new FeedError(
-          FeedErrorCode.ScanLimitExceeded,
-          'This page needs more than 2097152 rows. Retrying the same request will not help.',
-          422,
-        ),
-      ),
-    )
-    const metrics = new Metrics()
-    const app = createApp(
-      compatibleDatabase,
-      appServices(emptySkeleton(), { getFeed }),
-      metrics,
-      logger,
-    )
-
-    const response = await app.fetch(
-      post(feedPath, JSON.stringify(feedRequest())),
-    )
-
-    expect(response.status).toBe(422)
-    await expect(response.json()).resolves.toEqual({
-      error: 'ScanLimitExceeded',
-      message:
-        'This page needs more than 2097152 rows. Retrying the same request will not help.',
-    })
-    expect(await metrics.registry.metrics()).toContain(
-      'hypercerts_feed_errors_total{error="ScanLimitExceeded"} 1',
-    )
   })
 
   it('redacts unknown getFeed failures and records bounded route/error metrics', async () => {

@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Builds an ordered feed skeleton from the same selection and cursor as app.gainforest.feed.getFeed. Each entry is only an AT-URI. A repost yields the repost record's URI. A burst or an audio day yields the sample URIs it references, newest first, so a page can contain more entries than its limit. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer. Anonymous requests that set params.following must provide params.viewerDid. Omitting params selects the global feed. The caller hydrates returned AT-URIs separately.",
+      "description": "Builds an ordered feed skeleton from the same selection and cursor as app.gainforest.feed.getFeed. Each entry is only an AT-URI. A repost yields the repost record's URI. A burst or an audio chunk of up to 200 rows yields the sample URIs it references, newest first, so a page can contain more entries than its limit. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer. Anonymous requests that set params.following must provide params.viewerDid. Omitting params selects the global feed. The caller hydrates returned AT-URIs separately.",
       "errors": [
         {
           "name": "InvalidRequest",
@@ -17,10 +17,6 @@
         {
           "name": "InvalidCursor",
           "description": "The cursor is invalid or incompatible with the selected feed."
-        },
-        {
-          "name": "ScanLimitExceeded",
-          "description": "One account's run of observations or recordings is longer than the service reads, or reading it takes longer than the database statement timeout, so this page cannot be produced. Retrying the same request will not help."
         },
         {
           "name": "InternalError",
@@ -49,7 +45,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
-              "description": "Maximum number of feed items to select. A burst or an audio day is one item but can contribute up to 20 skeleton entries. The selected feed determines the default and may enforce a lower maximum."
+              "description": "Maximum number of feed items to select. A burst or an audio chunk of up to 200 rows is one item but can contribute up to 20 skeleton entries. The selected feed determines the default and may enforce a lower maximum."
             },
             "cursor": {
               "type": "string",

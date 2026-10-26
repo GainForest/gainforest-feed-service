@@ -2,7 +2,12 @@ import { performance } from 'node:perf_hooks'
 
 import type { QueryResultRow } from 'pg'
 
-import { decodeCursor, encodeCursor, type CursorCodec } from './cursor.js'
+import {
+  decodeCursor,
+  encodeCursor,
+  type CursorCodec,
+  type OpenGroup,
+} from './cursor.js'
 import { FeedError, FeedErrorCode } from './errors.js'
 import { feedItemKind } from './items.js'
 import type { FeedPage, FeedPagination, RegisteredFeed } from './registry.js'
@@ -30,6 +35,8 @@ export interface SqlFeedRuntime<Row extends QueryResultRow> {
 export interface FeedPosition {
   readonly sortValue: string
   readonly uri: string
+  /** The run the page cut at its size limit, so the next page can continue it. */
+  readonly group?: OpenGroup
 }
 
 /** One selected feed item and the last feed position it consumed. */

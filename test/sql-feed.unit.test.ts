@@ -112,6 +112,9 @@ describe('defineSqlFeed', () => {
         from: '2026-07-21T10:00:01.000Z',
         to: '2026-07-21T10:00:03.000Z',
         subjects: [`at://${did}/app.gainforest.dwc.occurrence/newest`],
+        groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
+        continued: false,
+        capped: false,
       },
       position: {
         sortValue: '2026-07-21T10:00:01.000000Z',

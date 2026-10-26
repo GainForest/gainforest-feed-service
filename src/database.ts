@@ -23,6 +23,21 @@ export interface DatabaseCompatibilityChecker {
   checkCompatibility(): Promise<DatabaseCompatibility>
 }
 
+/**
+ * Session settings applied to every pooled connection.
+ *
+ * - `default_transaction_read_only=on` is defense in depth next to the role's
+ *   grants.
+ * - `jit=off`: the feed statement hides its row bound from the planner
+ *   (`LIMIT (SELECT $7)`, see the header of `feed/feed-query.sql`), so the
+ *   planner assumes it reads a tenth of each collection and its estimated cost
+ *   grows with the table: about 12,000 on 170,000 rows and about 95,000 on ten
+ *   times that, close to the default `jit_above_cost` of 100,000. Above that
+ *   PostgreSQL compiles the statement, which adds 100 to 150 ms to every page
+ *   of a statement that runs in about 10 ms. JIT cannot help it.
+ */
+const SESSION_OPTIONS = '-c default_transaction_read_only=on -c jit=off'
+
 /** Small read-only Postgres pool used by the feed query and readiness checks. */
 export class Database implements DatabaseCompatibilityChecker {
   readonly #pool: Pool
@@ -39,7 +54,7 @@ export class Database implements DatabaseCompatibilityChecker {
       connectionTimeoutMillis: config.databaseConnectionTimeoutMs,
       statement_timeout: config.databaseStatementTimeoutMs,
       application_name: 'gainforest-feed-service',
-      options: '-c default_transaction_read_only=on',
+      options: SESSION_OPTIONS,
     }
     this.#pool = new Pool(poolConfig)
     this.#pool.on('error', (error) => {

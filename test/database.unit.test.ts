@@ -40,4 +40,21 @@ describe('Database', () => {
       }),
     )
   })
+
+  it('opens read-only sessions with JIT off, which only slows the feed statement down', () => {
+    const config = loadConfig({
+      DATABASE_URL: 'postgres://feed:secret@localhost:5432/indexer',
+      SERVICE_DID: 'did:web:feed.example',
+    })
+
+    new Database(config, pino({ enabled: false }))
+
+    for (const setting of ['default_transaction_read_only=on', 'jit=off']) {
+      expect(poolConstructor).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          options: expect.stringContaining(`-c ${setting}`) as unknown,
+        }),
+      )
+    }
+  })
 })

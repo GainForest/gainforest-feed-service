@@ -1,10 +1,16 @@
+import { isAtUriString } from '@atproto/syntax'
+
 import { uriOf, type SeedRecord } from './hyperindex-fixture.js'
+import { MAX_GROUP_ROWS } from '../../src/feed/types.js'
 
 /**
  * An independent in-memory model of the activity feed's selection rules. The
  * integration tests page the real SQL feed and compare it with this model, so
- * the two implementations have to agree on selection, order, bursts, and
- * audio groups.
+ * the two implementations have to agree on selection, order, runs, chunking,
+ * and the continued and capped flags.
+ *
+ * `run` numbers the burst and audio runs in feed order, so a test can compare
+ * which items belong to one run without knowing the service's group keys.
  */
 
 export type ModelItem =
@@ -29,15 +35,21 @@ export type ModelItem =
       readonly from: number
       readonly to: number
       readonly subjects: readonly string[]
+      readonly run: number
+      readonly continued: boolean
+      readonly capped: boolean
     }
   | {
       readonly type: 'audio'
       readonly did: string
-      readonly day: string
       readonly deployment: string | null
       readonly total: number
-      readonly at: number
+      readonly from: number
+      readonly to: number
       readonly subjects: readonly string[]
+      readonly run: number
+      readonly continued: boolean
+      readonly capped: boolean
     }
 
 interface Row {
@@ -47,10 +59,13 @@ interface Row {
   readonly kind: string
 }
 
-const BURST_GAP_MS = 12 * 60 * 60 * 1000
+const RUN_GAP_MS = 12 * 60 * 60 * 1000
 const SAMPLE_SIZE = 20
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000
 const REPOST_SUBJECT_KINDS = new Set(['post', 'observation', 'project'])
+/** What the Lexicon's `did` format accepts: the owner of a folder must be one. */
+const DID_SHAPE = /^did:[a-z]+:[A-Za-z0-9._:%-]*[A-Za-z0-9._-]$/
+const MAX_DID_LENGTH = 2048
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -150,30 +165,58 @@ const repostSubjectUri = (record: SeedRecord): string => {
 
 /**
  * The recorder folder is `deploymentRef` when it is an AT-URI. The folder's
- * owner is the account in that AT-URI when it is a DID, whoever stored the
- * recording. Without a folder the recording's own account owns it.
+ * owner is the account in that AT-URI when it is a valid DID, whoever stored
+ * the recording. Without a folder, or when the authority is a handle or
+ * anything else that is not a valid DID, the recording's own account owns it.
  */
 const audioKey = (
   record: SeedRecord,
 ): { readonly owner: string; readonly folder: string | null } => {
   const ref = record.json?.deploymentRef
   const folder = typeof ref === 'string' && ref.startsWith('at://') ? ref : null
-  const authority =
-    folder?.startsWith('at://did:') === true
-      ? folder.slice('at://'.length).split('/')[0]
-      : undefined
-  return { owner: authority ?? record.did, folder }
+  const authority = folder?.slice('at://'.length).split('/')[0]
+  const isDid =
+    authority !== undefined &&
+    authority.length <= MAX_DID_LENGTH &&
+    DID_SHAPE.test(authority)
+  return { owner: isDid ? authority : record.did, folder }
 }
 
-/** The full feed, newest first, for the given records. */
+/** Whether `row` is the next row of the run that ends with `previous`. */
+const joinsRun = (previous: Row, row: Row): boolean => {
+  if (previous.kind !== row.kind || previous.at - row.at > RUN_GAP_MS) {
+    return false
+  }
+  if (row.kind === 'observation') {
+    return (
+      previous.record.did === row.record.did &&
+      !isBioacoustic(previous.record) &&
+      !isBioacoustic(row.record)
+    )
+  }
+  if (row.kind === 'audio') {
+    const before = audioKey(previous.record)
+    const after = audioKey(row.record)
+    return before.owner === after.owner && before.folder === after.folder
+  }
+  return false
+}
+
+/**
+ * The full feed, newest first, for the given records. A run is cut into
+ * chunks of at most `maxGroupRows` rows. Every chunk after the first one
+ * continues its run, and a full chunk that the run goes on after is capped.
+ */
 export const modelFeed = (
   records: readonly SeedRecord[],
   options: {
     filter: string
     followed?: ReadonlySet<string>
     uriRank?: ReadonlyMap<string, number>
+    maxGroupRows?: number
   },
 ): ModelItem[] => {
+  const maxGroupRows = options.maxGroupRows ?? MAX_GROUP_ROWS
   const newestFirst = newestFirstBy(options.uriRank)
   const isValid = (record: SeedRecord): boolean =>
     (record.validation ?? 'valid') === 'valid'
@@ -213,70 +256,53 @@ export const modelFeed = (
       kind,
     })
   }
+  rows.sort(newestFirst)
 
-  const groupKey = (row: Row): string => {
-    const { owner, folder } = audioKey(row.record)
-    return `${owner}|${folder ?? ''}|${new Date(row.at).toISOString().slice(0, 10)}`
-  }
-  const audioGroups = new Map<string, Row[]>()
-  const stream: Row[] = []
+  // Runs are rows that are adjacent in the merged order and join each other.
+  const runs: Row[][] = []
   for (const row of rows) {
-    if (row.kind !== 'audio') {
-      stream.push(row)
-      continue
+    const current = runs.at(-1)
+    const previous = current?.at(-1)
+    if (
+      current !== undefined &&
+      previous !== undefined &&
+      joinsRun(previous, row)
+    ) {
+      current.push(row)
+    } else {
+      runs.push([row])
     }
-    const key = groupKey(row)
-    audioGroups.set(key, [...(audioGroups.get(key) ?? []), row])
   }
-  for (const group of audioGroups.values()) {
-    const [head] = [...group].sort(newestFirst)
-    if (head !== undefined) stream.push(head)
-  }
-  stream.sort(newestFirst)
 
   const items: ModelItem[] = []
-  let run: Row[] = []
-  const burstable = (row: Row): boolean =>
-    row.kind === 'observation' && !isBioacoustic(row.record)
-  const flush = (): void => {
+  let runNumber = 0
+  for (const run of runs) {
     const [first] = run
-    const last = run.at(-1)
-    if (first === undefined || last === undefined) return
-    if (run.length === 1) {
-      items.push(rowItem(first, audioGroups, groupKey, newestFirst))
-    } else {
-      items.push({
-        type: 'burst',
-        did: first.record.did,
-        total: run.length,
-        from: last.at,
-        to: first.at,
-        subjects: run.slice(0, SAMPLE_SIZE).map((row) => row.uri),
-      })
+    if (first === undefined) continue
+    // A lone observation stays a record item; audio is always a group.
+    if (
+      first.kind !== 'audio' &&
+      (first.kind !== 'observation' || run.length === 1)
+    ) {
+      items.push(singleItem(first))
+      continue
     }
-    run = []
+    for (let start = 0; start < run.length; start += maxGroupRows) {
+      const chunk = run.slice(start, start + maxGroupRows)
+      items.push(
+        groupItem(chunk, {
+          run: runNumber,
+          continued: start > 0,
+          capped: start + maxGroupRows < run.length,
+        }),
+      )
+    }
+    runNumber += 1
   }
-  for (const row of stream) {
-    const previous = run.at(-1)
-    const continues =
-      previous !== undefined &&
-      burstable(row) &&
-      burstable(previous) &&
-      previous.record.did === row.record.did &&
-      previous.at - row.at <= BURST_GAP_MS
-    if (!continues) flush()
-    run.push(row)
-  }
-  flush()
   return items
 }
 
-const rowItem = (
-  row: Row,
-  audioGroups: ReadonlyMap<string, readonly Row[]>,
-  groupKey: (row: Row) => string,
-  newestFirst: (a: Row, b: Row) => number,
-): ModelItem => {
+const singleItem = (row: Row): ModelItem => {
   if (row.kind === 'repost') {
     return {
       type: 'repost',
@@ -286,19 +312,6 @@ const rowItem = (
       at: row.at,
     }
   }
-  if (row.kind === 'audio') {
-    const { owner, folder } = audioKey(row.record)
-    const group = [...(audioGroups.get(groupKey(row)) ?? [])].sort(newestFirst)
-    return {
-      type: 'audio',
-      did: owner,
-      day: new Date(row.at).toISOString().slice(0, 10),
-      deployment: folder,
-      total: group.length,
-      at: row.at,
-      subjects: group.slice(0, SAMPLE_SIZE).map((member) => member.uri),
-    }
-  }
   return {
     type: 'record',
     kind: row.kind,
@@ -306,4 +319,31 @@ const rowItem = (
     did: row.record.did,
     at: row.at,
   }
+}
+
+const groupItem = (
+  chunk: readonly Row[],
+  flags: { run: number; continued: boolean; capped: boolean },
+): ModelItem => {
+  const first = chunk[0]
+  const last = chunk.at(-1)
+  if (first === undefined || last === undefined) {
+    throw new Error('A chunk has at least one row.')
+  }
+  const common = {
+    total: chunk.length,
+    from: last.at,
+    to: first.at,
+    subjects: chunk.slice(0, SAMPLE_SIZE).map((row) => row.uri),
+    ...flags,
+  }
+  if (first.kind === 'audio') {
+    const { owner, folder } = audioKey(first.record)
+    // The recordings group by `folder` whatever it holds, but the item names it
+    // only when it is a valid AT-URI: `deployment` is `format: at-uri`, and the
+    // output check is strict.
+    const deployment = folder !== null && isAtUriString(folder) ? folder : null
+    return { type: 'audio', did: owner, deployment, ...common }
+  }
+  return { type: 'burst', did: first.record.did, ...common }
 }

@@ -3,7 +3,6 @@ export const FeedErrorCode = {
   InvalidRequest: 'InvalidRequest',
   UnsupportedFeed: 'UnsupportedFeed',
   InvalidCursor: 'InvalidCursor',
-  ScanLimitExceeded: 'ScanLimitExceeded',
   InternalError: 'InternalError',
 } as const
 

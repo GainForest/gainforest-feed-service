@@ -34,7 +34,7 @@
         "following": {
           "type": "boolean",
           "default": false,
-          "description": "When true, limit the feed to activity by accounts the viewer follows through app.certified.graph.follow records. Reposts are scoped to the account that reposted, and audio groups to the group's owner."
+          "description": "When true, limit the feed to activity by accounts the viewer follows through app.certified.graph.follow records. Reposts are scoped to the account that reposted, and audio runs to the owner of the run's recorder folder."
         }
       }
     },
@@ -105,8 +105,8 @@
     },
     "burstItem": {
       "type": "object",
-      "required": ["did", "total", "from", "to", "subjects"],
-      "description": "A run of two or more observations by one account that are adjacent in the feed with no gap over 12 hours. Only a sample of the run is referenced.",
+      "required": ["did", "total", "from", "to", "subjects", "groupKey"],
+      "description": "One chunk of a run of observations by one account that are adjacent in the feed with no gap over 12 hours. A chunk covers at most 200 observations. A longer run continues in the following items, which have continued set and the same groupKey; merge them into one card. A chunk of a single observation is a burstItem only when it continues a run. Only a sample of the chunk is referenced.",
       "properties": {
         "did": {
           "type": "string",
@@ -115,63 +115,96 @@
         },
         "total": {
           "type": "integer",
-          "minimum": 2,
-          "description": "Exact number of observations in the run, which can far exceed the sample."
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Number of observations in this item, at most 200. It is not the size of the whole run when the run continues in other items."
         },
         "from": {
           "type": "string",
           "format": "datetime",
-          "description": "createdAt of the oldest observation in the run."
+          "description": "createdAt of the oldest observation in this item."
         },
         "to": {
           "type": "string",
           "format": "datetime",
-          "description": "createdAt of the newest observation in the run. This orders the item in the feed."
+          "description": "createdAt of the newest observation in this item. This orders the item in the feed."
         },
         "subjects": {
           "type": "array",
           "maxLength": 20,
           "items": { "type": "string", "format": "at-uri" },
-          "description": "AT-URIs of up to 20 observations from the run, newest first."
+          "description": "AT-URIs of up to 20 observations from this item, newest first."
+        },
+        "groupKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Opaque identifier of the run. Every chunk of one run has the same value and no two runs share one. It is stable only while one client pages through the feed: it changes when a newer record joins the run, so do not keep it as a long-lived identity across refreshes."
+        },
+        "continued": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when this item continues the run of the previous item, which has the same groupKey. False for the first chunk of a run."
+        },
+        "capped": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when this item is full and the run goes on in the next item, so the run is larger than the chunks seen so far. Results are current state, so a capped item is not guaranteed to be followed by an item with continued set: treat continued as the authority."
         }
       }
     },
     "audioItem": {
       "type": "object",
-      "required": ["did", "day", "total", "createdAt", "subjects"],
-      "description": "The recordings uploaded into one recorder folder on one UTC day, whoever stored them. A recording without a folder is grouped by its own account. Only a sample of the recordings is referenced.",
+      "required": ["did", "total", "from", "to", "subjects", "groupKey"],
+      "description": "One chunk of a run of recordings in one recorder folder that are adjacent in the feed with no gap over 12 hours, whoever stored them. A recording without a folder is grouped by its own account. A chunk covers at most 200 recordings. A longer run continues in the following items, which have continued set and the same groupKey; merge them into one card. Only a sample of the chunk is referenced.",
       "properties": {
         "did": {
           "type": "string",
           "format": "did",
-          "description": "Owner of the group: the account in the AT-URI of the recorder folder, or the recording's own account when it has no folder."
-        },
-        "day": {
-          "type": "string",
-          "minLength": 10,
-          "maxLength": 10,
-          "description": "UTC calendar day of the recordings, formatted YYYY-MM-DD."
+          "description": "Owner of the run: the account in the AT-URI of the recorder folder, or the recording's own account when it has no folder."
         },
         "deployment": {
           "type": "string",
           "format": "at-uri",
-          "description": "AT-URI of the app.gainforest.ac.deployment folder the recordings belong to. Omitted for recordings without a folder."
+          "description": "AT-URI of the app.gainforest.ac.deployment folder the recordings belong to. Omitted for recordings without a folder and when the recording's deploymentRef is not a valid AT-URI."
         },
         "total": {
           "type": "integer",
           "minimum": 1,
-          "description": "Exact number of recordings uploaded to this folder on this day."
+          "maximum": 200,
+          "description": "Number of recordings in this item, at most 200. It is not the size of the whole run when the run continues in other items."
         },
-        "createdAt": {
+        "from": {
           "type": "string",
           "format": "datetime",
-          "description": "createdAt of the newest recording in the group. This orders the item in the feed."
+          "description": "createdAt of the oldest recording in this item."
+        },
+        "to": {
+          "type": "string",
+          "format": "datetime",
+          "description": "createdAt of the newest recording in this item. This orders the item in the feed."
         },
         "subjects": {
           "type": "array",
           "maxLength": 20,
           "items": { "type": "string", "format": "at-uri" },
-          "description": "AT-URIs of up to 20 recordings from the group, newest first."
+          "description": "AT-URIs of up to 20 recordings from this item, newest first."
+        },
+        "groupKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Opaque identifier of the run. Every chunk of one run has the same value and no two runs share one. It is stable only while one client pages through the feed: it changes when a newer record joins the run, so do not keep it as a long-lived identity across refreshes."
+        },
+        "continued": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when this item continues the run of the previous item, which has the same groupKey. False for the first chunk of a run."
+        },
+        "capped": {
+          "type": "boolean",
+          "default": false,
+          "description": "True when this item is full and the run goes on in the next item, so the run is larger than the chunks seen so far. Results are current state, so a capped item is not guaranteed to be followed by an item with continued set: treat continued as the authority."
         }
       }
     }

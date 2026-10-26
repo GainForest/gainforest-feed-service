@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import { FeedErrorCode } from '../src/feed/errors.js'
+import { MAX_GROUP_ROWS } from '../src/feed/types.js'
 import {
   $input as feedInput,
   $output as feedOutput,
@@ -81,22 +82,29 @@ const repostItem = {
   createdAt,
   subject: at('app.gainforest.feed.post', 'p1'),
 }
+const groupKey = 'AAAAAAAAAAAAAAAAAAAAAA'
 const burstItem = {
   $type: 'app.gainforest.feed.defs#burstItem',
   did: actorDid,
-  total: 300,
+  total: MAX_GROUP_ROWS,
   from: '2026-07-21T09:00:00.000Z',
   to: createdAt,
   subjects: [at('app.gainforest.dwc.occurrence', 'o1')],
+  groupKey,
+  continued: false,
+  capped: true,
 }
 const audioItem = {
   $type: 'app.gainforest.feed.defs#audioItem',
   did: actorDid,
-  day: '2026-07-21',
   deployment: at('app.gainforest.ac.deployment', 'folder'),
   total: 40,
-  createdAt,
+  from: '2026-07-21T09:00:00.000Z',
+  to: createdAt,
   subjects: [at('app.gainforest.ac.audio', 'a1')],
+  groupKey,
+  continued: true,
+  capped: false,
 }
 
 const parseFeed = (feed: unknown[]) => feedOutput.schema.$parse({ feed })
@@ -257,6 +265,35 @@ describe('feed Lexicon contract', () => {
     expect(parsed.cursor).toBe('next')
   })
 
+  it('caps burst and audio items at the same number of rows as the service', () => {
+    for (const name of ['burstItem', 'audioItem']) {
+      expect(valueAt(defs, name, 'properties', 'total', 'maximum')).toBe(
+        MAX_GROUP_ROWS,
+      )
+    }
+  })
+
+  it.each([
+    ['a burst', burstItem],
+    ['an audio item', audioItem],
+  ])(
+    'applies false to the continued and capped flags of %s that omits them',
+    (_name, item) => {
+      const { continued: _continued, capped: _capped, ...withoutFlags } = item
+
+      expect(parseFeed([withoutFlags]).feed[0]).toMatchObject({
+        continued: false,
+        capped: false,
+      })
+    },
+  )
+
+  it('accepts a one-row continuation chunk of a burst', () => {
+    expect(() =>
+      parseFeed([{ ...burstItem, total: 1, continued: true, capped: false }]),
+    ).not.toThrow()
+  })
+
   it('accepts record and repost items without a cid', () => {
     const { cid: _recordCid, ...recordWithoutCid } = recordItem
     const { cid: _repostCid, ...repostWithoutCid } = repostItem
@@ -284,7 +321,17 @@ describe('feed Lexicon contract', () => {
     ['a record with a malformed cid', { ...recordItem, cid: 'not-a-cid' }],
     ['a record owned by a non-DID', { ...recordItem, did: 'alice.test' }],
     ['a repost without its subject', { ...repostItem, subject: undefined }],
-    ['a burst of one observation', { ...burstItem, total: 1 }],
+    ['a burst of no observations', { ...burstItem, total: 0 }],
+    [
+      'a burst larger than the cap',
+      { ...burstItem, total: MAX_GROUP_ROWS + 1 },
+    ],
+    ['a burst without a group key', { ...burstItem, groupKey: undefined }],
+    ['a burst with an empty group key', { ...burstItem, groupKey: '' }],
+    [
+      'a burst with a group key that is too long',
+      { ...burstItem, groupKey: 'A'.repeat(65) },
+    ],
     [
       'a burst with more than 20 samples',
       {
@@ -295,15 +342,21 @@ describe('feed Lexicon contract', () => {
       },
     ],
     ['a burst without a time range', { ...burstItem, from: undefined }],
+    ['an audio item with no recordings', { ...audioItem, total: 0 }],
     [
-      'an audio day that is not ten characters',
-      { ...audioItem, day: '2026-7-1' },
+      'an audio item larger than the cap',
+      { ...audioItem, total: MAX_GROUP_ROWS + 1 },
     ],
-    ['an audio group with no recordings', { ...audioItem, total: 0 }],
+    ['an audio item without its newest time', { ...audioItem, to: undefined }],
     [
-      'an audio group without its newest time',
-      { ...audioItem, createdAt: undefined },
+      'an audio item without its oldest time',
+      { ...audioItem, from: undefined },
     ],
+    [
+      'an audio item without a group key',
+      { ...audioItem, groupKey: undefined },
+    ],
+    ['an audio item with an empty group key', { ...audioItem, groupKey: '' }],
   ])('rejects %s', (_name, item) => {
     expect(() => parseFeed([item])).toThrow()
   })

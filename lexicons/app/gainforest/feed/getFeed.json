@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Builds an ordered GainForest activity feed from current indexed records for the registered feed and parameters selected in the request. The response contains references and selection metadata only: AT-URIs, CIDs, account DIDs, timestamps, and group counts. It does not contain record content. The caller hydrates the referenced records itself. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer. Anonymous requests that set params.following must provide params.viewerDid. Omitting params selects the global feed.",
+      "description": "Builds an ordered GainForest activity feed from current indexed records for the registered feed and parameters selected in the request. The response contains references and selection metadata only: AT-URIs, CIDs, account DIDs, timestamps, and group counts. It does not contain record content. The caller hydrates the referenced records itself. A burst or audio item covers at most 200 rows; a longer run continues in the following items, which have continued set and the same groupKey and which clients merge into one card. Authentication is optional. When supplied, the AT Protocol service-auth issuer is the viewer. Anonymous requests that set params.following must provide params.viewerDid. Omitting params selects the global feed.",
       "errors": [
         {
           "name": "InvalidRequest",
@@ -17,10 +17,6 @@
         {
           "name": "InvalidCursor",
           "description": "The cursor is invalid or incompatible with the selected feed."
-        },
-        {
-          "name": "ScanLimitExceeded",
-          "description": "One account's run of observations or recordings is longer than the service reads, or reading it takes longer than the database statement timeout, so this page cannot be produced. Retrying the same request will not help."
         },
         {
           "name": "InternalError",
@@ -49,7 +45,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 100,
-              "description": "Maximum number of feed items to return. A burst or an audio day is one item. The selected feed determines the default and may enforce a lower maximum."
+              "description": "Maximum number of feed items to return. A burst or an audio run is one item per 200 rows. The selected feed determines the default and may enforce a lower maximum."
             },
             "cursor": {
               "type": "string",

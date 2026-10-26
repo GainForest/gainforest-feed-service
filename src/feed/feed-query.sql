@@ -1,16 +1,27 @@
 -- GainForest activity feed over Hyperindex's `record` table.
 --
 -- Parameters
---   $1 kinds        text[]       active kinds: project, observation, organization, post, repost, audio
---   $2 following    boolean      limit to accounts $3 follows
---   $3 viewer       text         viewer DID, used only when $2 is true
---   $4 cursor_ts    timestamptz  position of the last row the previous page consumed, or null
---   $5 cursor_uri   text         tie-breaker for $4, or null
---   $6 fetch_limit  integer      page size + 1; the extra item only proves a next page exists
---   $7 scan_rows    integer      most rows read from the merged feed order; the caller retries
---                                with a larger value while `complete` is false
---   $8 gap_seconds  integer      longest gap between neighbours inside one observation burst
---   $9 sample_size  integer      most sample URIs a burst or audio day returns
+--   $1  kinds        text[]       active kinds: project, observation, organization, post, repost, audio
+--   $2  following    boolean      limit to accounts $3 follows
+--   $3  viewer       text         viewer DID, used only when $2 is true
+--   $4  cursor_ts    timestamptz  position of the last row the previous page consumed, or null
+--   $5  cursor_uri   text         tie-breaker for $4, or null
+--   $6  fetch_limit  integer      page size + 1; the extra item only proves a next page exists
+--   $7  scan_rows    integer      most rows read from the merged feed order: (page size) * $10 + 1.
+--                                 Every item covers at most $10 rows, so the page's items cover at
+--                                 most (page size) * $10 rows. One more row, the first row of the
+--                                 item after the page, proves that a next page exists and tells
+--                                 whether the page's last chunk continues. One statement therefore
+--                                 always settles a page; there is no retry with a wider window.
+--                                 It is a bound, not a quantity the statement always reads: see
+--                                 "Shape" below.
+--   $8  gap_seconds  integer      longest gap between neighbours inside one run
+--   $9  sample_size  integer      most sample URIs one burst or audio item returns
+--   $10 chunk_rows   integer      most rows one burst or audio item covers
+--   $11 open_kind    text         kind ('observation' or 'audio') the cursor names for the run the
+--                                 previous page cut at $10 rows and left open, or null. Nothing else
+--                                 about that run travels in the cursor: the statement reads its
+--                                 account and folder from the cursor row, see "Open run".
 --
 -- Feed order is record_created_at DESC, uri DESC: Hyperindex's materialized,
 -- RFC3339-validated top-level `createdAt`. Rows with a null value are excluded.
@@ -25,13 +36,64 @@
 -- are written out in each place, not taken from a CTE: the planner needs to see
 -- them to keep reading the timeline index in order.
 --
--- Result: one row per item, in feed order, plus the `complete` flag. When the
--- page has no items the result is a single row whose item columns are null.
+-- Runs: rows that are adjacent in the merged feed order, have the same kind and
+-- the same key, and are no more than $8 seconds apart form one run.
+--   observation: the key is the account. A bioacoustic sighting never joins.
+--   audio:       the key is the owner and the folder. The folder is
+--                `deploymentRef` when it is an AT-URI. Its owner is the account
+--                in that AT-URI when that is a valid DID, whoever stored the
+--                recording; without a folder, or when the authority is a handle
+--                or anything else that is not a valid DID, the recording's own
+--                account owns it (see `audio_keyed`).
+-- Any other row between two rows, of another kind or another key, ends the run.
+-- Every other kind is one item per row.
+--
+-- A run is cut into items ("chunks") of at most $10 rows, newest first. A chunk
+-- after the first one `continued` the run; a chunk that is full and followed by
+-- another row of the same run is `capped`.
+--
+-- Open run. A page ends at a chunk boundary. When its last chunk is `capped`, the
+-- cursor names the run's kind ($11), and this page decides whether its first row
+-- continues that run. The cursor row ($4, $5) is read by primary key and its
+-- account and folder are derived here, with the same expressions the arms use
+-- (`audio_keyed` for audio, the account for observations). The cursor therefore
+-- carries no record content, and a crafted cursor cannot choose the account or
+-- the folder. The row is the "previous row" of the page's first row. There is no
+-- open run, and the first item starts a new one, when that row no longer exists,
+-- is no longer valid or in range, is not of the named kind, or no longer has the
+-- timestamp the cursor carries.
+--
+-- Result: one row per item, in feed order, up to the sentinel item. The
+-- sentinel carries no group details because the caller never maps it.
+--
+-- Shape. The statement streams: `branches` is merged lazily, every level up to
+-- `numbered` passes rows on as they arrive, and `numbered` ends the stream at the
+-- first row of the item after the sentinel item. The whole sentinel chunk (up to
+-- $10 rows) is therefore read, and never more than $7 rows. A page of ordinary
+-- items reads a few hundred rows, and only a page made of full chunks reads the
+-- whole $7. Keep these choices, each is there for the planner (EXPLAIN ANALYZE
+-- on a production-shaped table before changing any):
+--   * The cursor is a predicate on $4 and $5, not a CTE. PostgreSQL then uses it
+--     as an index condition on the timeline index, so a deep page costs what
+--     the first page costs.
+--   * The observation and audio arms and the merged stream take their limit
+--     from a subquery. With a literal limit PostgreSQL leaves the ordered index
+--     scan for a bitmap scan and a sort of the whole collection, reading every
+--     JSON and spilling to disk, once the limit passes about a third of the
+--     collection. A limit it cannot see makes it plan for the first tenth.
+--   * `item_no` is count(*) FILTER (...): of the window aggregates only
+--     count(*) lets PostgreSQL stop the window early (a "run condition").
+--   * A subquery that has window functions is not inlined into its user, so
+--     the expression that reads a record is computed once per row. `checked`
+--     has row_number() for that reason; `audio_keyed` uses OFFSET 0.
+--   * Every arm starts with `EXISTS (SELECT 1 FROM follows)` when $2 is true.
+--     PostgreSQL runs it once, as a one-time filter. Without it a viewer who
+--     follows nobody, or nobody with matching rows, makes every arm walk its
+--     whole collection for a filter that nothing passes.
+--   * Arms carry no record content. `has_sidecar_text` is a cheap test on the
+--     observation's text; only the few rows that pass it have their record
+--     read, in `checked`, by primary key.
 WITH
-params AS (
-  SELECT COALESCE($4::timestamptz, 'infinity'::timestamptz) AS cursor_ts,
-         COALESCE($5::text, '') AS cursor_uri
-),
 -- Accounts the viewer currently follows. Only read when $2 is true.
 follows AS (
   SELECT DISTINCT follow.json->>'subject' AS did
@@ -42,133 +104,105 @@ follows AS (
     AND follow.validation_status = 'valid'
     AND jsonb_typeof(follow.json->'subject') = 'string'
 ),
--- Audio groups follow the GainForest app's upload days. A recording that names
--- a recorder folder (`deploymentRef` is an AT-URI) belongs to that folder, and
--- the folder's owner, the account in the AT-URI, owns the group, whoever stored
--- the recording. A recording without a folder belongs to its own account. A
--- group is one owner, one folder (or none), and one UTC day. The `audio_key`
--- lateral subqueries below compute that key and must stay identical.
---
--- Audio: the newest $7 recordings below the cursor ...
-audio_scan AS (
-  SELECT r.uri, r.cid, r.record_created_at AS ts, audio_key.owner, audio_key.folder
+-- Audio recordings with the key that groups them: the owner and the folder. The
+-- folder is `deploymentRef` when it is an AT-URI. Its owner is the AT-URI's
+-- authority when that is a valid DID (`did:method:id`, at most 2,048 characters,
+-- no trailing ':' or '%', the shape the Lexicon's `did` format accepts), and the
+-- recording's own account otherwise. `audioItem.did` is therefore always a DID,
+-- whatever a record stores. NOT MATERIALIZED: the audio arm and the open-run
+-- lookup both inline it. The OFFSET 0 levels make PostgreSQL read
+-- `deploymentRef` and split the authority once per row.
+audio_keyed AS NOT MATERIALIZED (
+  SELECT r.uri, r.collection, r.record_created_at, r.validation_status,
+         audio_key.owner, audio_key.folder
   FROM record AS r
-  CROSS JOIN params AS p
   CROSS JOIN LATERAL (
-    SELECT CASE WHEN r.json->>'deploymentRef' LIKE 'at://%' THEN r.json->>'deploymentRef' END AS folder,
-           CASE WHEN r.json->>'deploymentRef' LIKE 'at://did:%'
-                THEN substring(r.json->>'deploymentRef' from '^at://([^/]+)')
+    SELECT CASE WHEN reference.value LIKE 'at://%' THEN reference.value END AS folder,
+           CASE WHEN length(reference.authority) <= 2048
+                 AND reference.authority ~ '^did:[a-z]+:[A-Za-z0-9._:%-]*[A-Za-z0-9._-]$'
+                THEN reference.authority
                 ELSE r.did
            END AS owner
+    FROM (
+      SELECT raw.value,
+             CASE WHEN raw.value LIKE 'at://%' THEN split_part(raw.value, '/', 3) END AS authority
+      FROM (SELECT r.json->>'deploymentRef' AS value OFFSET 0) AS raw
+      OFFSET 0
+    ) AS reference
   ) AS audio_key
-  WHERE 'audio' = ANY($1::text[])
-    AND r.collection = 'app.gainforest.ac.audio'
-    AND r.record_created_at IS NOT NULL
+),
+-- The run the previous page left open, read from the cursor row (see "Open run").
+-- At most one row; none when $11 is null, which is every first page.
+open_run AS (
+  SELECT 'audio'::text AS kind, a.owner AS did, a.folder AS deployment
+  FROM audio_keyed AS a
+  WHERE $11::text = 'audio'
+    AND a.uri = $5::text
+    AND a.collection = 'app.gainforest.ac.audio'
+    AND a.record_created_at = $4::timestamptz
+    AND a.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+    AND a.validation_status = 'valid'
+  UNION ALL
+  SELECT 'observation', r.did, NULL
+  FROM record AS r
+  WHERE $11::text = 'observation'
+    AND r.uri = $5::text
+    AND r.collection = 'app.gainforest.dwc.occurrence'
+    AND r.record_created_at = $4::timestamptz
     AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-    AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
     AND r.validation_status = 'valid'
-    AND (NOT $2::boolean OR audio_key.owner IN (SELECT did FROM follows))
-  ORDER BY r.record_created_at DESC, r.uri DESC
-  LIMIT $7::integer
 ),
--- ... reduced to one head per group: the newest recording of that group. Only
--- the head enters the feed order, so the rest of a group never appears on a
--- later page. A group whose head sits at or above the cursor was emitted by an
--- earlier page and is skipped. Only a group on the cursor's own UTC day can
--- have such a head, so the check runs for those heads only.
-audio_heads AS (
-  SELECT head.uri, head.cid, head.ts, head.owner, head.folder
-  FROM (
-    SELECT scan.*,
-           row_number() OVER (
-             PARTITION BY scan.owner, scan.folder, (scan.ts AT TIME ZONE 'UTC')::date
-             ORDER BY scan.ts DESC, scan.uri DESC
-           ) AS position_in_group
-    FROM audio_scan AS scan
-  ) AS head
-  CROSS JOIN params AS p
-  WHERE head.position_in_group = 1
-    AND CASE
-      WHEN (head.ts AT TIME ZONE 'UTC')::date = (p.cursor_ts AT TIME ZONE 'UTC')::date
-        THEN NOT EXISTS (
-          SELECT 1
-          FROM record AS emitted
-          CROSS JOIN LATERAL (
-            SELECT CASE WHEN emitted.json->>'deploymentRef' LIKE 'at://%' THEN emitted.json->>'deploymentRef' END AS folder,
-                   CASE WHEN emitted.json->>'deploymentRef' LIKE 'at://did:%'
-                        THEN substring(emitted.json->>'deploymentRef' from '^at://([^/]+)')
-                        ELSE emitted.did
-                   END AS owner
-          ) AS audio_key
-          WHERE emitted.collection = 'app.gainforest.ac.audio'
-            AND emitted.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-            AND (emitted.record_created_at, emitted.uri) >= (p.cursor_ts, p.cursor_uri)
-            AND emitted.record_created_at < (date_trunc('day', head.ts AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
-            AND emitted.validation_status = 'valid'
-            AND audio_key.owner = head.owner
-            AND audio_key.folder IS NOT DISTINCT FROM head.folder
-        )
-      ELSE true
-    END
-),
--- The oldest recording the audio scan read, when it stopped at its row limit.
-audio_horizon AS (
-  SELECT oldest.ts, oldest.uri
-  FROM (SELECT count(*) AS scanned FROM audio_scan) AS size
-  CROSS JOIN LATERAL (
-    SELECT scan.ts, scan.uri
-    FROM audio_scan AS scan
-    ORDER BY scan.ts ASC, scan.uri ASC
-    LIMIT 1
-  ) AS oldest
-  WHERE size.scanned >= $7::integer
-),
--- Every kind contributes its newest rows in feed order. A kind that is never
--- part of a burst needs at most $6 rows, because each of its rows is a feed
--- item on its own. Observations can form long bursts, so they are read up to
--- $7 rows.
+-- Every kind contributes its newest rows in feed order, lazily: the merge below
+-- asks each arm for one row at a time. A kind whose rows are one item each can
+-- add at most $6 rows to a page. Observations and audio form runs, so they may
+-- add up to $7. A row carries the kind, the owning account (for audio the
+-- folder's owner), the audio folder, and whether an observation's text mentions
+-- a bioacoustic sidecar. A record's content is read only where a later step
+-- needs it.
 branches AS (
-  (SELECT 'project'::text AS kind, r.uri, r.cid, r.did, r.record_created_at AS ts,
-          NULL::text AS subject, NULL::text AS deployment, true AS burstable
-   FROM record AS r, params AS p
+  (SELECT 'project'::text AS kind, r.uri, r.did, r.record_created_at AS ts, NULL::text AS deployment, false AS has_sidecar_text
+   FROM record AS r
    WHERE 'project' = ANY($1::text[])
      AND r.collection = 'org.hypercerts.collection'
      AND r.record_created_at IS NOT NULL
      AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND ($4::timestamptz IS NULL OR (r.record_created_at, r.uri) < ($4::timestamptz, $5::text))
      AND r.validation_status = 'valid'
      AND r.json->>'type' IN ('project', 'Project')
+     AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM follows))
      AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
    ORDER BY r.record_created_at DESC, r.uri DESC
    LIMIT $6::integer)
   UNION ALL
-  (SELECT 'organization', r.uri, r.cid, r.did, r.record_created_at, NULL, NULL, true
-   FROM record AS r, params AS p
+  (SELECT 'organization', r.uri, r.did, r.record_created_at, NULL, false
+   FROM record AS r
    WHERE 'organization' = ANY($1::text[])
      AND r.collection = 'app.certified.actor.organization'
      AND r.record_created_at IS NOT NULL
      AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND ($4::timestamptz IS NULL OR (r.record_created_at, r.uri) < ($4::timestamptz, $5::text))
      AND r.validation_status = 'valid'
+     AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM follows))
      AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
    ORDER BY r.record_created_at DESC, r.uri DESC
    LIMIT $6::integer)
   UNION ALL
   -- Top-level posts only; replies are comments. Event announcements are not
   -- activity either.
-  (SELECT 'post', r.uri, r.cid, r.did, r.record_created_at, NULL, NULL, true
-   FROM record AS r, params AS p
+  (SELECT 'post', r.uri, r.did, r.record_created_at, NULL, false
+   FROM record AS r
    WHERE 'post' = ANY($1::text[])
      AND r.collection = 'app.gainforest.feed.post'
      AND r.record_created_at IS NOT NULL
      AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND ($4::timestamptz IS NULL OR (r.record_created_at, r.uri) < ($4::timestamptz, $5::text))
      AND r.validation_status = 'valid'
      AND r.json->>'reply' IS NULL
      AND NOT COALESCE(
        jsonb_typeof(r.json->'tags') = 'array' AND r.json->'tags' ? 'community-event',
        false
      )
+     AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM follows))
      AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
    ORDER BY r.record_created_at DESC, r.uri DESC
    LIMIT $6::integer)
@@ -177,14 +211,15 @@ branches AS (
   -- feed record: a valid project (type project or Project), observation, or
   -- top-level non-event post, owned by another account. The row is the
   -- reposter's.
-  (SELECT 'repost', r.uri, r.cid, r.did, r.record_created_at, r.json->'subject'->>'uri', NULL, true
-   FROM record AS r, params AS p
+  (SELECT 'repost', r.uri, r.did, r.record_created_at, NULL, false
+   FROM record AS r
    WHERE 'repost' = ANY($1::text[])
      AND r.collection = 'app.gainforest.feed.repost'
      AND r.record_created_at IS NOT NULL
      AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND ($4::timestamptz IS NULL OR (r.record_created_at, r.uri) < ($4::timestamptz, $5::text))
      AND r.validation_status = 'valid'
+     AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM follows))
      AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
      AND EXISTS (
        SELECT 1
@@ -211,156 +246,178 @@ branches AS (
    ORDER BY r.record_created_at DESC, r.uri DESC
    LIMIT $6::integer)
   UNION ALL
-  (SELECT 'audio', head.uri, head.cid, head.owner, head.ts, NULL, head.folder, false
-   FROM audio_heads AS head
-   ORDER BY head.ts DESC, head.uri DESC
-   LIMIT $6::integer)
+  (SELECT 'audio', a.uri, a.owner, a.record_created_at, a.folder, false
+   FROM audio_keyed AS a
+   WHERE 'audio' = ANY($1::text[])
+     AND a.collection = 'app.gainforest.ac.audio'
+     AND a.record_created_at IS NOT NULL
+     AND a.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
+     AND ($4::timestamptz IS NULL OR (a.record_created_at, a.uri) < ($4::timestamptz, $5::text))
+     AND a.validation_status = 'valid'
+     AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM follows))
+     AND (NOT $2::boolean OR a.owner IN (SELECT did FROM follows))
+   ORDER BY a.record_created_at DESC, a.uri DESC
+   LIMIT (SELECT $7::integer))
   UNION ALL
-  -- An observation with a valid bioacoustic sidecar is shown on its own, with
-  -- its spectrogram, so it never joins a burst.
-  (SELECT 'observation', r.uri, r.cid, r.did, r.record_created_at, NULL, NULL,
-          NOT COALESCE(
-            sidecar.segment IS NOT NULL
-            AND jsonb_typeof(sidecar.segment) = 'object'
-            AND sidecar.segment->'version' = '1'::jsonb
-            AND jsonb_typeof(sidecar.segment->'sourceAudioUri') = 'string'
-            AND sidecar.segment->>'labelCategory' IN ('bird', 'frog', 'insect', 'other', 'note')
-            AND jsonb_typeof(sidecar.segment->'startTimeSeconds') = 'number'
-            AND jsonb_typeof(sidecar.segment->'endTimeSeconds') = 'number'
-            AND jsonb_typeof(sidecar.segment->'minFrequencyHz') = 'number'
-            AND jsonb_typeof(sidecar.segment->'maxFrequencyHz') = 'number'
-            AND sidecar.segment->>'sourceAudioUri' = ANY(
-              ARRAY(SELECT btrim(media) FROM unnest(string_to_array(r.json->>'associatedMedia', '|')) AS media)
-            ),
-            false
-          )
+  (SELECT 'observation', r.uri, r.did, r.record_created_at, NULL,
+          COALESCE(r.json->>'dynamicProperties' LIKE '%gainforestBioacoustics%', false)
    FROM record AS r
-   CROSS JOIN params AS p
-   CROSS JOIN LATERAL (
-     SELECT CASE
-       WHEN jsonb_typeof(r.json->'dynamicProperties') = 'string'
-        AND r.json->>'dynamicProperties' LIKE '%gainforestBioacoustics%'
-        AND pg_input_is_valid(r.json->>'dynamicProperties', 'jsonb')
-         THEN (r.json->>'dynamicProperties')::jsonb->'gainforestBioacoustics'
-     END AS segment
-   ) AS sidecar
    WHERE 'observation' = ANY($1::text[])
      AND r.collection = 'app.gainforest.dwc.occurrence'
      AND r.record_created_at IS NOT NULL
      AND r.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-     AND (r.record_created_at, r.uri) < (p.cursor_ts, p.cursor_uri)
+     AND ($4::timestamptz IS NULL OR (r.record_created_at, r.uri) < ($4::timestamptz, $5::text))
      AND r.validation_status = 'valid'
+     AND (NOT $2::boolean OR EXISTS (SELECT 1 FROM follows))
      AND (NOT $2::boolean OR r.did IN (SELECT did FROM follows))
    ORDER BY r.record_created_at DESC, r.uri DESC
-   LIMIT $7::integer)
+   LIMIT (SELECT $7::integer))
 ),
 -- The merged feed order, cut at $7 rows.
 stream AS (
-  SELECT * FROM branches ORDER BY ts DESC, uri DESC LIMIT $7::integer
+  SELECT * FROM branches ORDER BY ts DESC, uri DESC LIMIT (SELECT $7::integer)
 ),
--- A row continues the previous row's burst when both are burstable
--- observations by the same account, adjacent in this merged order, and no
--- more than $8 seconds apart. Any other row, including another kind or another
--- account's observation, starts a new item.
-flagged AS (
+-- Which neighbours could belong to one run. For the first row the previous
+-- row is the cursor row, when it opens a run (`open_run`). Only observations
+-- next to an observation of the same account can be bioacoustic sightings that
+-- matter, so only those rows are inspected below.
+paired AS (
   SELECT s.*,
          COALESCE(
-           s.kind = 'observation' AND s.burstable
-           AND lag(s.kind) OVER feed_order = 'observation'
-           AND lag(s.burstable) OVER feed_order
-           AND lag(s.did) OVER feed_order = s.did
-           AND lag(s.ts) OVER feed_order - s.ts <= make_interval(secs => $8::integer),
+           s.kind IN ('observation', 'audio')
+           AND s.kind = lag(s.kind, 1, (SELECT o.kind FROM open_run AS o)) OVER feed_order
+           AND s.did = lag(s.did, 1, (SELECT o.did FROM open_run AS o)) OVER feed_order
+           AND s.deployment IS NOT DISTINCT FROM lag(s.deployment, 1, (SELECT o.deployment FROM open_run AS o)) OVER feed_order
+           AND lag(s.ts, 1, $4::timestamptz) OVER feed_order - s.ts <= make_interval(secs => $8::integer),
            false
-         ) AS continues_run
+         ) AS touches_previous,
+         COALESCE(
+           s.kind = 'observation'
+           AND lead(s.kind) OVER feed_order = 'observation'
+           AND lead(s.did) OVER feed_order = s.did,
+           false
+         ) AS may_touch_next
   FROM stream AS s
   WINDOW feed_order AS (ORDER BY s.ts DESC, s.uri DESC)
 ),
--- Item number: how many items have started at or before this row.
-numbered AS (
-  SELECT f.*, sum((NOT f.continues_run)::integer) OVER (ORDER BY f.ts DESC, f.uri DESC) AS item_no
-  FROM flagged AS f
+-- An observation with a valid bioacoustic sidecar is shown on its own, with
+-- its spectrogram, so it never joins a burst. Its record is read here, by
+-- primary key, and only when the answer matters. The row_number() makes this a
+-- window subquery, which PostgreSQL does not inline into the next level: an
+-- inlined subquery repeats its expressions once per use, and the lookup must
+-- run once per row.
+checked AS (
+  SELECT p.*,
+         CASE
+           WHEN p.has_sidecar_text AND (p.touches_previous OR p.may_touch_next)
+             THEN (
+               SELECT COALESCE(
+                        segment.value IS NOT NULL
+                        AND jsonb_typeof(segment.value) = 'object'
+                        AND segment.value->'version' = '1'::jsonb
+                        AND jsonb_typeof(segment.value->'sourceAudioUri') = 'string'
+                        AND segment.value->>'labelCategory' IN ('bird', 'frog', 'insect', 'other', 'note')
+                        AND jsonb_typeof(segment.value->'startTimeSeconds') = 'number'
+                        AND jsonb_typeof(segment.value->'endTimeSeconds') = 'number'
+                        AND jsonb_typeof(segment.value->'minFrequencyHz') = 'number'
+                        AND jsonb_typeof(segment.value->'maxFrequencyHz') = 'number'
+                        AND segment.value->>'sourceAudioUri' = ANY(
+                          ARRAY(SELECT btrim(media) FROM unnest(string_to_array(r.json->>'associatedMedia', '|')) AS media)
+                        ),
+                        false
+                      )
+               FROM record AS r
+               CROSS JOIN LATERAL (
+                 SELECT CASE
+                   WHEN jsonb_typeof(r.json->'dynamicProperties') = 'string'
+                    AND r.json->>'dynamicProperties' LIKE '%gainforestBioacoustics%'
+                    AND pg_input_is_valid(r.json->>'dynamicProperties', 'jsonb')
+                     THEN (r.json->>'dynamicProperties')::jsonb->'gainforestBioacoustics'
+                 END AS value
+               ) AS segment
+               WHERE r.uri = p.uri
+             )
+           ELSE false
+         END AS bioacoustic,
+         row_number() OVER (ORDER BY p.ts DESC, p.uri DESC) AS rn
+  FROM paired AS p
 ),
-runs AS (
+-- A row joins the previous row's run when they touch and neither is a
+-- bioacoustic sighting. Audio has no such exception.
+flagged AS (
+  SELECT c.*,
+         COALESCE(
+           c.touches_previous
+           AND (c.kind = 'audio' OR (NOT c.bioacoustic AND NOT lag(c.bioacoustic, 1, false) OVER feed_order)),
+           false
+         ) AS joins_previous
+  FROM checked AS c
+  WINDOW feed_order AS (ORDER BY c.ts DESC, c.uri DESC)
+),
+-- The row number of the row that started the run this row is in. It is null
+-- until the first run starts: those rows continue the run left open by the
+-- previous page. `joins_next` tells whether the following row joins this run.
+positioned AS (
+  SELECT f.*,
+         max(CASE WHEN NOT f.joins_previous THEN f.rn END) OVER feed_order AS run_head_rn,
+         lead(f.joins_previous, 1, false) OVER feed_order AS joins_next
+  FROM flagged AS f
+  WINDOW feed_order AS (ORDER BY f.ts DESC, f.uri DESC)
+),
+-- Position of the row inside its run, counted from this page's first row of
+-- the run, and the number of the item the row belongs to: a new item starts
+-- at every run head and after every $10 rows of a run.
+located AS (
+  SELECT p.*, p.rn - COALESCE(p.run_head_rn, 1) + 1 AS pos_in_run
+  FROM positioned AS p
+),
+numbered AS (
+  SELECT counted.*
+  FROM (
+    SELECT l.*,
+           count(*) FILTER (WHERE ((l.pos_in_run - 1) % $10::integer) = 0)
+             OVER (ORDER BY l.ts DESC, l.uri DESC) AS item_no
+    FROM located AS l
+  ) AS counted
+  WHERE counted.item_no <= $6::integer
+),
+-- Details of the page's own items. The sentinel is left out.
+chunks AS (
   SELECT n.item_no,
          count(*)::integer AS row_count,
          (array_agg(n.ts ORDER BY n.ts ASC, n.uri ASC))[1] AS oldest_ts,
          (array_agg(n.uri ORDER BY n.ts ASC, n.uri ASC))[1] AS oldest_uri,
-         (array_agg(n.uri ORDER BY n.ts DESC, n.uri DESC))[1:$9::integer] AS samples
+         (array_agg(n.uri ORDER BY n.ts DESC, n.uri DESC))[1:$9::integer] AS samples,
+         bool_or(n.pos_in_run % $10::integer = 0 AND n.joins_next) AS capped
   FROM numbered AS n
-  WHERE n.item_no <= $6::integer
+  WHERE n.item_no < $6::integer
   GROUP BY n.item_no
 ),
+-- The first row of each item, with whether the item continues a run.
 items AS (
-  SELECT n.item_no, n.kind, n.uri, n.cid, n.did, n.ts, n.subject, n.deployment,
-         run.row_count, run.oldest_ts, run.oldest_uri, run.samples
+  SELECT n.item_no, n.kind, n.uri, n.did, n.ts, n.deployment,
+         (n.run_head_rn IS NULL OR n.pos_in_run > $10::integer) AS continued,
+         c.row_count, c.oldest_ts, c.oldest_uri, c.samples, COALESCE(c.capped, false) AS capped
   FROM numbered AS n
-  JOIN runs AS run ON run.item_no = n.item_no
-  WHERE NOT n.continues_run
-),
--- The audio group behind each audio head: every recording of that owner and
--- folder on that UTC day, whoever stored it.
-audio_groups AS (
-  SELECT item.item_no, audio_group.total, audio_group.samples
-  FROM items AS item
-  CROSS JOIN LATERAL (
-    SELECT count(*)::integer AS total,
-           (array_agg(member.uri ORDER BY member.record_created_at DESC, member.uri DESC))[1:$9::integer] AS samples
-    FROM record AS member
-    CROSS JOIN LATERAL (
-      SELECT CASE WHEN member.json->>'deploymentRef' LIKE 'at://%' THEN member.json->>'deploymentRef' END AS folder,
-             CASE WHEN member.json->>'deploymentRef' LIKE 'at://did:%'
-                  THEN substring(member.json->>'deploymentRef' from '^at://([^/]+)')
-                  ELSE member.did
-             END AS owner
-    ) AS audio_key
-    WHERE member.collection = 'app.gainforest.ac.audio'
-      AND member.record_created_at BETWEEN '1970-01-01T00:00:00Z' AND now() + interval '5 minutes'
-      AND member.record_created_at >= date_trunc('day', item.ts AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
-      AND member.record_created_at < (date_trunc('day', item.ts AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
-      AND member.validation_status = 'valid'
-      AND audio_key.owner = item.did
-      AND audio_key.folder IS NOT DISTINCT FROM item.deployment
-  ) AS audio_group
-  WHERE item.kind = 'audio' AND item.item_no < $6::integer
-),
--- The page is exact when both of these hold:
---  * the item after it was found, or nothing was cut off the merged order; and
---  * the audio groups are known as far down as the page reaches. The audio
---    scan sees every recording down to its horizon, the oldest recording it
---    read. Below that, groups can be missing unless the scan already found as
---    many as a page can use.
-completeness AS (
-  SELECT (
-           (SELECT count(*) FROM audio_heads) >= $6::integer
-           OR NOT EXISTS (SELECT 1 FROM audio_horizon)
-           OR EXISTS (
-             SELECT 1
-             FROM items AS sentinel, audio_horizon AS horizon
-             WHERE sentinel.item_no = $6::integer
-               AND (sentinel.ts, sentinel.uri) >= (horizon.ts, horizon.uri)
-           )
-         )
-         AND (
-           (SELECT count(*) FROM items) >= $6::integer
-           OR (SELECT count(*) FROM stream) < $7::integer
-         ) AS complete
+  LEFT JOIN chunks AS c ON c.item_no = n.item_no
+  WHERE ((n.pos_in_run - 1) % $10::integer) = 0
+    AND n.item_no <= $6::integer
 )
-SELECT completeness.complete,
-       item.item_no::integer AS item_no,
+SELECT item.item_no::integer AS item_no,
        item.kind,
        item.uri,
        -- Hyperindex stores an empty CID for records whose event carried none.
-       NULLIF(item.cid, '') AS cid,
+       NULLIF(head.cid, '') AS cid,
        item.did,
        to_char(item.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS sort_value,
-       item.subject,
+       CASE WHEN item.kind = 'repost' THEN head.json->'subject'->>'uri' END AS subject,
        item.deployment,
-       to_char(item.ts AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
-       (CASE WHEN item.kind = 'audio' THEN audio_group.total ELSE item.row_count END)::integer AS total,
+       item.row_count AS total,
        to_char(item.oldest_ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS tail_sort_value,
        item.oldest_uri AS tail_uri,
-       CASE WHEN item.kind = 'audio' THEN audio_group.samples ELSE item.samples END AS samples
-FROM completeness
-LEFT JOIN items AS item ON true
-LEFT JOIN audio_groups AS audio_group ON audio_group.item_no = item.item_no
+       item.samples,
+       item.continued,
+       item.capped
+FROM items AS item
+JOIN record AS head ON head.uri = item.uri
 ORDER BY item.item_no
