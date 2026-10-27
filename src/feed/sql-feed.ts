@@ -7,7 +7,7 @@ import { FeedError, FeedErrorCode } from './errors.js'
 import { feedItemKind } from './items.js'
 import type { FeedPage, FeedPagination, RegisteredFeed } from './registry.js'
 import type { ActivityFeedItem, FeedParams } from './types.js'
-import type { Metrics } from '../metrics.js'
+import type { FeedMetricName, Metrics } from '../metrics.js'
 
 export interface NormalizedPageParams {
   readonly limit: number
@@ -55,6 +55,8 @@ export interface SqlFeedDefinition<
   DatabaseRow extends QueryResultRow,
 > {
   readonly id: string
+  /** The bounded `feed` label of this feed's database duration metric. */
+  readonly metricName: FeedMetricName
   readonly params: {
     readonly type: Params['$type']
     readonly parse: (input: FeedParams) => Params
@@ -128,6 +130,7 @@ export const defineSqlFeed = <
       runtime.metrics.observeDatabase(
         'feed',
         (performance.now() - startedAt) / 1_000,
+        definition.metricName,
       )
     }
 

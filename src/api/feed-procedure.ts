@@ -17,7 +17,11 @@ import {
 import type { Logger } from 'pino'
 
 import type { $input as feedInput } from '../lexicons/app/gainforest/feed/getFeedSkeleton.defs.js'
-import type { OptionalServiceAuth } from '../auth/service-auth.js'
+import { applyAuthenticatedViewer } from '../auth/input.js'
+import type {
+  OptionalServiceAuth,
+  ServiceAuthCredentials,
+} from '../auth/service-auth.js'
 import { FeedError, FeedErrorCode } from '../feed/errors.js'
 import type { FeedRequest } from '../feed/types.js'
 
@@ -51,7 +55,7 @@ interface RegisterFeedProcedureOptions<Output> {
   readonly errorLog: string
 }
 
-/** Registers a feed procedure with shared output validation and error handling. */
+/** Registers a feed procedure with shared viewer binding, output validation, and error handling. */
 export const registerFeedProcedure = <Output>({
   router,
   method,
@@ -61,9 +65,18 @@ export const registerFeedProcedure = <Output>({
   parseOutput,
   errorLog,
 }: RegisterFeedProcedureOptions<Output>): void => {
-  const handler = async (input: FeedProcedureInput) => {
+  const handler = async (
+    input: FeedProcedureInput,
+    credentials: ServiceAuthCredentials | undefined,
+  ) => {
     try {
-      const output = await execute(toFeedInput(input))
+      const output = await execute(
+        applyAuthenticatedViewer(
+          toFeedInput(input),
+          credentials,
+          auth !== undefined,
+        ),
+      )
       return { body: parseOutput(output) }
     } catch (cause) {
       if (cause instanceof FeedError) {
@@ -90,14 +103,20 @@ export const registerFeedProcedure = <Output>({
   }
 
   // The router verifies a supplied token before the handler runs, so an invalid
-  // one is a 401 and never an anonymous request. The verified caller is not read
-  // here: the activity feed gives every caller the same page for the same request.
-  const methodHandler: LexRouterMethodHandler<JsonProcedure> = async ({
-    input,
-  }) => handler(input.body)
+  // one is a 401 and never an anonymous request. The verified caller is read
+  // only for the following feed, whose viewer it is; the activity feed gives
+  // every caller the same page for the same request.
   if (auth === undefined) {
-    router.add(method, methodHandler)
+    const unauthenticatedHandler: LexRouterMethodHandler<
+      JsonProcedure,
+      void
+    > = async ({ input }) => handler(input.body, undefined)
+    router.add(method, unauthenticatedHandler)
   } else {
-    router.add(method, { auth, handler: methodHandler })
+    const authenticatedHandler: LexRouterMethodHandler<
+      JsonProcedure,
+      ServiceAuthCredentials | undefined
+    > = async ({ input, credentials }) => handler(input.body, credentials)
+    router.add(method, { auth, handler: authenticatedHandler })
   }
 }

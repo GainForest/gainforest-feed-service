@@ -1,7 +1,7 @@
 {
   "lexicon": 1,
   "id": "app.gainforest.feed.defs",
-  "description": "Shared wire definitions for GainForest activity feed procedures. The feed returns references and selection metadata only. It never returns record content; callers hydrate the referenced records themselves.",
+  "description": "Shared wire definitions for GainForest feed procedures. The feeds return references and selection metadata only. They never return record content; callers hydrate the referenced records themselves.",
   "defs": {
     "activityFeed": {
       "type": "token",
@@ -24,6 +24,35 @@
           ],
           "default": "all",
           "description": "Which kind of activity to include. Reposts appear only when the filter is all."
+        }
+      }
+    },
+    "followingFeed": {
+      "type": "token",
+      "description": "Identifies the GainForest following feed algorithm: the activity feed restricted to what the accounts a viewer follows have published."
+    },
+    "followingFeedParams": {
+      "type": "object",
+      "description": "Parameters accepted by the GainForest following feed. The feed holds the records of the accounts the viewer follows, through valid app.certified.graph.follow records, selected like the activity feed: the same kinds, grouping, and cursor. A recording belongs to the owner of its recorder folder, so a follower of that owner sees the recordings other accounts stored in the owner's folders (the folder's app.gainforest.ac.deployment record must exist and be valid), and a recording a followed account stored in a folder someone else owns is left out. A viewer who follows more than 500 accounts gets the 500 most recently followed. The viewer is the account that sent an authenticated request; an anonymous request must name one with viewerDid. Properties not defined here are ignored.",
+      "properties": {
+        "filter": {
+          "type": "string",
+          "maxLength": 64,
+          "knownValues": [
+            "all",
+            "project",
+            "observation",
+            "organization",
+            "post",
+            "audio"
+          ],
+          "default": "all",
+          "description": "Which kind of activity to include. Reposts appear only when the filter is all."
+        },
+        "viewerDid": {
+          "type": "string",
+          "format": "did",
+          "description": "The account whose follows scope the feed. Optional when the request is authenticated: the authenticated service caller is the viewer, and a value that names anyone else is rejected. Required for an anonymous request."
         }
       }
     },

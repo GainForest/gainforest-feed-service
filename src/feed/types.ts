@@ -5,6 +5,14 @@ export const ACTIVITY_FEED_ID = 'app.gainforest.feed.defs#activityFeed' as const
 export const ACTIVITY_FEED_PARAMS_TYPE =
   'app.gainforest.feed.defs#activityFeedParams' as const
 
+/** Identifier of the GainForest following feed algorithm. */
+export const FOLLOWING_FEED_ID =
+  'app.gainforest.feed.defs#followingFeed' as const
+
+/** Open-union discriminator for the following feed's parameters. */
+export const FOLLOWING_FEED_PARAMS_TYPE =
+  'app.gainforest.feed.defs#followingFeedParams' as const
+
 /** Values accepted by the activity feed's `filter` parameter. */
 export const ACTIVITY_FILTERS = [
   'all',
@@ -45,6 +53,18 @@ export interface ActivityFeedParams {
   readonly filter?: string
 }
 
+/** Parameters accepted by the following feed. */
+export interface FollowingFeedParams {
+  readonly $type: typeof FOLLOWING_FEED_PARAMS_TYPE
+  /** Which kind of activity to include; omitted means `all`. */
+  readonly filter?: string
+  /**
+   * The account whose follows scope the feed. The procedures fill it in from
+   * the verified service caller; an anonymous request has to send it.
+   */
+  readonly viewerDid?: string
+}
+
 /** Discriminator retained when the public open union receives an unknown variant. */
 export interface UnknownFeedParams {
   /** Lexicon type that selects the parameter validator for this feed. */
@@ -52,7 +72,8 @@ export interface UnknownFeedParams {
 }
 
 /** Parameters for any feed algorithm accepted by the public open union. */
-export type FeedParams = ActivityFeedParams | UnknownFeedParams
+export type FeedParams =
+  ActivityFeedParams | FollowingFeedParams | UnknownFeedParams
 
 /** Raw request body shared by both feed procedures. */
 export interface FeedRequest {
@@ -170,4 +191,10 @@ export interface NormalizedActivityRequest {
   readonly limit: number
   /** Raw cursor supplied by the caller, if any. */
   readonly cursor?: string
+}
+
+/** Fully validated following feed request: an activity request for one viewer. */
+export interface NormalizedFollowingRequest extends NormalizedActivityRequest {
+  /** The syntactically valid DID of the account whose follows scope the feed. */
+  readonly viewerDid: string
 }

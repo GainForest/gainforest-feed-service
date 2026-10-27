@@ -48,6 +48,7 @@ issues=$(psql "$TEST_DATABASE_URL" \
     expected_indexes(index_name) AS (
       VALUES
         ('idx_record_timeline_collection_created'),
+        ('idx_record_timeline_author_collection_created'),
         ('idx_record_did_collection')
     ),
     index_issues AS (
@@ -75,7 +76,7 @@ issues=$(psql "$TEST_DATABASE_URL" \
 
 if [ -n "$issues" ]; then
   printf 'Hyperindex schema mismatch:\n%s\n' "$issues" >&2
-  echo 'Migrate an isolated disposable database with the Hyperindex migrations; the service needs migration 010 (record_created_at and its timeline index) and migration 012 (validation_status). This check does not apply migrations.' >&2
+  echo 'Migrate an isolated disposable database with the Hyperindex migrations; the service needs migration 010 (record_created_at and its timeline indexes), migration 001 (idx_record_did_collection) and migration 012 (validation_status). This check does not apply migrations.' >&2
   exit 1
 fi
 

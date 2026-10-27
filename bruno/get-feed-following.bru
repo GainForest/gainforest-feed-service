@@ -16,11 +16,10 @@ headers {
 
 body:json {
   {
-    "feedId": "{{feedId}}",
+    "feedId": "app.gainforest.feed.defs#followingFeed",
     "params": {
-      "$type": "{{feedParamsType}}",
+      "$type": "app.gainforest.feed.defs#followingFeedParams",
       "filter": "all",
-      "following": true,
       "viewerDid": "{{viewerDid}}"
     },
     "limit": {{limit}},

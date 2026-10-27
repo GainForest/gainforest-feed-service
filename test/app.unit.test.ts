@@ -15,6 +15,8 @@ import type { FeedReader, FeedSkeletonReader } from '../src/feed/service.js'
 import {
   ACTIVITY_FEED_ID,
   ACTIVITY_FEED_PARAMS_TYPE,
+  FOLLOWING_FEED_ID,
+  FOLLOWING_FEED_PARAMS_TYPE,
   RECORD_ITEM_TYPE,
   type FeedRequest,
 } from '../src/feed/types.js'
@@ -435,6 +437,283 @@ describe('HTTP application', () => {
       }
     },
   )
+
+  describe('following feed viewer', () => {
+    const routes = [
+      ['skeleton', skeletonPath],
+      ['feed', feedPath],
+    ] as const
+    const other = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
+
+    /** An app over services that record the request they receive. */
+    const recordingApp = (credentials?: ServiceAuthCredentials) => {
+      const received: FeedRequest[] = []
+      const remember = (input: FeedRequest) => {
+        received.push(input)
+        return Promise.resolve({ feed: [] })
+      }
+      const app = createApp(
+        compatibleDatabase,
+        appServices(
+          { getFeedSkeleton: vi.fn(remember) },
+          { getFeed: vi.fn(remember) },
+        ),
+        new Metrics(),
+        logger,
+        authFor(credentials),
+      )
+      return { app, received }
+    }
+
+    const trustedHeaders = { authorization: 'Bearer trusted-token' }
+
+    const following = (params?: Record<string, unknown>): string =>
+      JSON.stringify({
+        feedId: FOLLOWING_FEED_ID,
+        ...(params === undefined
+          ? {}
+          : { params: { $type: FOLLOWING_FEED_PARAMS_TYPE, ...params } }),
+      })
+
+    it.each(routes)(
+      'makes the verified caller the viewer on the %s route, with or without params',
+      async (_label, url) => {
+        const { app, received } = recordingApp(trustedCredentials(caller))
+
+        for (const body of [
+          following(),
+          following({}),
+          following({ filter: 'post' }),
+        ]) {
+          const response = await app.fetch(post(url, body, trustedHeaders))
+          expect(response.status).toBe(200)
+        }
+
+        expect(received).toEqual([
+          {
+            feedId: FOLLOWING_FEED_ID,
+            params: { $type: FOLLOWING_FEED_PARAMS_TYPE, viewerDid: caller },
+          },
+          {
+            feedId: FOLLOWING_FEED_ID,
+            params: {
+              $type: FOLLOWING_FEED_PARAMS_TYPE,
+              filter: 'all',
+              viewerDid: caller,
+            },
+          },
+          {
+            feedId: FOLLOWING_FEED_ID,
+            params: {
+              $type: FOLLOWING_FEED_PARAMS_TYPE,
+              filter: 'post',
+              viewerDid: caller,
+            },
+          },
+        ])
+      },
+    )
+
+    it.each(routes)(
+      'accepts an authenticated viewerDid that is the caller on the %s route',
+      async (_label, url) => {
+        const { app, received } = recordingApp(trustedCredentials(caller))
+
+        const response = await app.fetch(
+          post(url, following({ viewerDid: caller }), trustedHeaders),
+        )
+
+        expect(response.status).toBe(200)
+        expect(received[0]?.params).toMatchObject({ viewerDid: caller })
+      },
+    )
+
+    it.each(routes)(
+      'rejects an authenticated viewerDid that names someone else on the %s route',
+      async (_label, url) => {
+        const { app, received } = recordingApp(trustedCredentials(caller))
+
+        const response = await app.fetch(
+          post(url, following({ viewerDid: other }), trustedHeaders),
+        )
+
+        expect(response.status).toBe(400)
+        expect(received).toEqual([])
+        await expectErrorResponse(
+          response,
+          'InvalidRequest',
+          'does not match the authenticated service caller',
+        )
+      },
+    )
+
+    it.each(routes)(
+      'requires a viewerDid from an anonymous request on the %s route',
+      async (_label, url) => {
+        const { app, received } = recordingApp()
+
+        for (const body of [following(), following({ filter: 'post' })]) {
+          const response = await app.fetch(post(url, body))
+          expect(response.status).toBe(400)
+          await expectErrorResponse(
+            response,
+            'InvalidRequest',
+            'params.viewerDid is required for an anonymous following feed request',
+          )
+        }
+
+        expect(received).toEqual([])
+      },
+    )
+
+    // Without service auth configured no token can help, so the error does not
+    // suggest one.
+    it.each(routes)(
+      'does not suggest a bearer token when the service verifies none on the %s route',
+      async (_label, url) => {
+        const getFeedSkeleton = vi.fn()
+        const getFeed = vi.fn()
+        const app = createApp(
+          compatibleDatabase,
+          appServices({ getFeedSkeleton }, { getFeed }),
+          new Metrics(),
+          logger,
+        )
+
+        const response = await app.fetch(post(url, following()))
+
+        expect(response.status).toBe(400)
+        expect(getFeedSkeleton).not.toHaveBeenCalled()
+        expect(getFeed).not.toHaveBeenCalled()
+        const text = await response.text()
+        expect(text).toContain('"error":"InvalidRequest"')
+        expect(text).toContain('params.viewerDid is required')
+        expect(text).not.toMatch(/token|bearer/i)
+      },
+    )
+
+    it.each(routes)(
+      'passes the viewerDid of an anonymous request on the %s route',
+      async (_label, url) => {
+        const { app, received } = recordingApp()
+
+        const response = await app.fetch(
+          post(url, following({ viewerDid: other })),
+        )
+
+        expect(response.status).toBe(200)
+        expect(received).toEqual([
+          {
+            feedId: FOLLOWING_FEED_ID,
+            params: {
+              $type: FOLLOWING_FEED_PARAMS_TYPE,
+              filter: 'all',
+              viewerDid: other,
+            },
+          },
+        ])
+      },
+    )
+
+    it.each(routes)(
+      'rejects a viewerDid that is not a DID on the %s route',
+      async (_label, url) => {
+        for (const credentials of [undefined, trustedCredentials(caller)]) {
+          const { app, received } = recordingApp(credentials)
+
+          const response = await app.fetch(
+            post(
+              url,
+              following({ viewerDid: 'alice.test' }),
+              credentials === undefined ? {} : trustedHeaders,
+            ),
+          )
+
+          expect(response.status).toBe(400)
+          expect(received).toEqual([])
+          await expectErrorResponse(response, 'InvalidRequest')
+        }
+      },
+    )
+
+    it.each(routes)(
+      'leaves params of another feed to the feed registry on the %s route',
+      async (_label, url) => {
+        const { app, received } = recordingApp(trustedCredentials(caller))
+
+        const response = await app.fetch(
+          post(
+            url,
+            JSON.stringify({
+              feedId: FOLLOWING_FEED_ID,
+              params: { $type: ACTIVITY_FEED_PARAMS_TYPE },
+            }),
+            trustedHeaders,
+          ),
+        )
+
+        expect(response.status).toBe(200)
+        expect(received[0]?.params).toMatchObject({
+          $type: ACTIVITY_FEED_PARAMS_TYPE,
+        })
+        expect(JSON.stringify(received)).not.toContain(caller)
+      },
+    )
+
+    // The viewer belongs to the following feed alone: the activity feed gives
+    // every caller the same page, so a verified caller never reaches it.
+    it.each(routes)(
+      'does not bind the caller to the activity feed on the %s route',
+      async (_label, url) => {
+        const { app, received } = recordingApp(trustedCredentials(caller))
+
+        for (const params of [
+          { $type: ACTIVITY_FEED_PARAMS_TYPE },
+          { $type: FOLLOWING_FEED_PARAMS_TYPE, viewerDid: other },
+        ]) {
+          const response = await app.fetch(
+            post(
+              url,
+              JSON.stringify({ feedId: ACTIVITY_FEED_ID, params }),
+              trustedHeaders,
+            ),
+          )
+          expect(response.status).toBe(200)
+        }
+
+        expect(received.map((request) => request.params)).toMatchObject([
+          { $type: ACTIVITY_FEED_PARAMS_TYPE },
+          { $type: FOLLOWING_FEED_PARAMS_TYPE, viewerDid: other },
+        ])
+        expect(JSON.stringify(received)).not.toContain(caller)
+      },
+    )
+
+    it.each(routes)(
+      'does not fall back to anonymous on invalid auth for a following request on the %s route',
+      async (_label, url) => {
+        const getFeedSkeleton = vi.fn()
+        const getFeed = vi.fn()
+        const app = createApp(
+          compatibleDatabase,
+          appServices({ getFeedSkeleton }, { getFeed }),
+          new Metrics(),
+          logger,
+          authFor(undefined, true),
+        )
+
+        const response = await app.fetch(
+          post(url, following({ viewerDid: other }), {
+            authorization: 'Bearer invalid-token',
+          }),
+        )
+
+        expect(response.status).toBe(401)
+        expect(getFeedSkeleton).not.toHaveBeenCalled()
+        expect(getFeed).not.toHaveBeenCalled()
+      },
+    )
+  })
 
   it.each([
     ['skeleton', skeletonPath],

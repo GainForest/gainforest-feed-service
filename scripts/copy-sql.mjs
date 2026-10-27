@@ -1,7 +1,11 @@
 import { mkdir, copyFile } from 'node:fs/promises'
 
-const source = new URL('../src/feed/feed-query.sql', import.meta.url)
-const destination = new URL('../dist/feed/feed-query.sql', import.meta.url)
+const statements = ['feed-query.sql', 'following-query.sql']
 
 await mkdir(new URL('../dist/feed/', import.meta.url), { recursive: true })
-await copyFile(source, destination)
+for (const statement of statements) {
+  await copyFile(
+    new URL(`../src/feed/${statement}`, import.meta.url),
+    new URL(`../dist/feed/${statement}`, import.meta.url),
+  )
+}

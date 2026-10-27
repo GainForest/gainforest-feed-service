@@ -13,7 +13,7 @@
     "codegen": "node scripts/codegen.mjs",
     "prebuild": "npm run codegen",
     "build": "tsc -p tsconfig.build.json && node scripts/copy-sql.mjs && node scripts/check-build.mjs",
-    "dev": "tsx watch --include src/feed/feed-query.sql src/server.ts",
+    "dev": "tsx watch --include src/feed/feed-query.sql --include src/feed/following-query.sql src/server.ts",
     "prelint": "npm run codegen",
     "lint": "eslint . --max-warnings 0",
     "prelint:fix": "npm run codegen",

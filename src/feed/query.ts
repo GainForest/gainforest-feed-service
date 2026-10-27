@@ -38,7 +38,10 @@ export const BATCH_ROWS = 500
  */
 export const REQUEST_ROWS = 5_000
 
-/** Internal options for the activity feed; they are not part of any request. */
+/**
+ * Internal options for the activity feed, also accepted by the following feed;
+ * they are not part of any request.
+ */
 export interface ActivityFeedOptions {
   /**
    * Rows one statement returns. Tests use a small value to exercise batching
@@ -52,7 +55,8 @@ export interface ActivityFeedOptions {
   readonly requestRows?: number
 }
 
-interface RowLimits {
+/** The row sizes the batch loop runs with: `BATCH_ROWS` and `REQUEST_ROWS` in production. */
+export interface RowLimits {
   readonly batchRows: number
   readonly requestRows: number
 }
@@ -66,7 +70,7 @@ const ALL_KINDS = [
   'audio',
 ] as const
 
-/** One result row of the activity feed statement: one feed row. */
+/** One result row of a feed statement: one feed row. Both feeds return these columns. */
 export interface ActivityFeedQueryRow extends QueryResultRow {
   readonly kind: string
   readonly uri: string
@@ -84,7 +88,8 @@ const rowInvariantError = (detail: string): Error =>
     `Activity feed query invariant failed: ${detail}; verify the SQL projection before serving feed requests.`,
   )
 
-const kindsForFilter = (filter: ActivityFilter): readonly string[] =>
+/** The kinds a filter selects, as the statements' `$1`. */
+export const kindsForFilter = (filter: ActivityFilter): readonly string[] =>
   filter === 'all' ? ALL_KINDS : [filter]
 
 const parseActivityFeedParams = (input: {
@@ -139,7 +144,7 @@ const microsOf = (uri: string, sortValue: string): number => {
 }
 
 /** Maps one statement row to a feed row, checking what its kind must have. */
-const toFeedRow = (row: ActivityFeedQueryRow): FeedRow => {
+export const toFeedRow = (row: ActivityFeedQueryRow): FeedRow => {
   const base = {
     uri: row.uri,
     cid: row.cid,
@@ -170,19 +175,33 @@ const toFeedRow = (row: ActivityFeedQueryRow): FeedRow => {
 }
 
 /**
+ * The statement a feed reads its rows with: "the next rows after a position,
+ * newest first". The batch loop sends `text` once per batch.
+ */
+export interface BatchStatement {
+  readonly text: string
+  /** Bind values for one batch: at most `rows` rows strictly after `after`. */
+  readonly bind: (
+    after: FeedPosition | undefined,
+    rows: number,
+  ) => readonly unknown[]
+}
+
+/**
  * Builds one page: fetches batches of rows after the cursor and folds them
  * into cards until the page is full, the data ends, or the request has
  * consumed its row budget. Each statement starts after the last consumed row.
  */
-const selectActivityPage = async (
+export const selectBatchedPage = async (
   database: SqlFeedQueryExecutor<ActivityFeedQueryRow>,
+  statement: BatchStatement,
   input: {
-    readonly params: NormalizedActivityRequest
+    readonly limit: number
     readonly cursor: FeedCursor | undefined
   },
   limits: RowLimits,
 ): Promise<SelectedPage> => {
-  const page = new PageBuilder(input.params.limit)
+  const page = new PageBuilder(input.limit)
   let after: FeedPosition | undefined =
     input.cursor === undefined
       ? undefined
@@ -191,8 +210,8 @@ const selectActivityPage = async (
   for (;;) {
     const wanted = Math.min(limits.batchRows, limits.requestRows - consumed)
     const { rows } = await database.query(
-      ACTIVITY_FEED_QUERY,
-      bindActivityFeed(input.params, after, wanted),
+      statement.text,
+      statement.bind(after, wanted),
     )
     for (const row of rows) {
       if (!page.accept(toFeedRow(row))) return page.finish('full')
@@ -204,7 +223,8 @@ const selectActivityPage = async (
   }
 }
 
-const validateRowLimit = (name: string, value: number): void => {
+/** Rejects a row size that is not an integer of at least 1. */
+export const validateRowLimit = (name: string, value: number): void => {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new Error(`${name} must be an integer of at least 1.`)
   }
@@ -223,6 +243,7 @@ export const createActivityFeed = (
   validateRowLimit('requestRows', limits.requestRows)
   return defineSqlFeed(runtime, {
     id: ACTIVITY_FEED_ID,
+    metricName: 'activity',
     params: {
       type: ACTIVITY_FEED_PARAMS_TYPE,
       parse: parseActivityFeedParams,
@@ -230,6 +251,15 @@ export const createActivityFeed = (
       default: { $type: ACTIVITY_FEED_PARAMS_TYPE },
     },
     cursor: timestampUriCursor,
-    select: (database, input) => selectActivityPage(database, input, limits),
+    select: (database, input) =>
+      selectBatchedPage(
+        database,
+        {
+          text: ACTIVITY_FEED_QUERY,
+          bind: (after, rows) => bindActivityFeed(input.params, after, rows),
+        },
+        { limit: input.params.limit, cursor: input.cursor },
+        limits,
+      ),
   })
 }

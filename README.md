@@ -1,10 +1,10 @@
 # GainForest Feed Service
 
-A standalone, read-only TypeScript service. It reads current [Hyperindex](https://github.com/GainForest/hyperindex) PostgreSQL data and serves the GainForest activity feed over XRPC.
+A standalone, read-only TypeScript service. It reads current [Hyperindex](https://github.com/GainForest/hyperindex) PostgreSQL data and serves the GainForest activity feed and following feed over XRPC.
 
 **`getFeed` returns references and selection metadata, not records.** Each feed item names records by AT-URI and CID, and adds the account, timestamps, and group counts the service decided. It carries no titles, text, images, or profile data. GainForest hydrates the referenced records itself, through Hyperindex's GraphQL API.
 
-Hyperindex owns the PostgreSQL tables. The service does not ingest or change indexed data, call Hyperindex, PDS, or AppView APIs, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication. The activity feed is the same for every caller, so a verified token changes nothing in the response.
+Hyperindex owns the PostgreSQL tables. The service does not ingest or change indexed data, call Hyperindex, PDS, or AppView APIs, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication. The activity feed is the same for every caller, so a verified token changes nothing in the response. Only the following feed has a viewer: the verified caller.
 
 ## Endpoints
 
@@ -43,11 +43,32 @@ The activity feed (`app.gainforest.feed.defs#activityFeed`) takes `app.gainfores
 | -------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `filter` | `all`   | `all`, `project`, `observation`, `organization`, `post`, or `audio`. Reposts appear only with `all`. |
 
-**The feed does not depend on the caller.** Every caller gets the same page for the same request, so the feed needs no login and a verified token changes nothing in the response. A service caller may still add `-H 'authorization: Bearer <service-auth-jwt>'`. The service verifies it: the token must target the bare DID configured as `SERVICE_DID`, carry the exact endpoint NSID in `lxm`, and be signed by the issuer's `#atproto` key. The verifier stays for the planned following feed (see [Planned](#planned)). Invalid supplied authorization returns 401 and is never treated as anonymous.
+**The feed does not depend on the caller.** Every caller gets the same page for the same request, so the feed needs no login and a verified token changes nothing in the response. A service caller may still add `-H 'authorization: Bearer <service-auth-jwt>'`. The service verifies it: the token must target the bare DID configured as `SERVICE_DID`, carry the exact endpoint NSID in `lxm`, and be signed by the issuer's `#atproto` key. The verified caller matters to one feed only, the [following feed](#following-feed). Invalid supplied authorization returns 401 and is never treated as anonymous.
 
 `params` is optional for this feed. Omitting it means the default, `filter` `all`, so a request with only a `feedId` returns the global feed. `params` holds only `filter`: a property it does not define, such as `following` or `viewerDid`, is ignored, so a request that sets one gets the global feed. A mismatched `$type` returns `InvalidRequest`, while an unknown `feedId` returns `UnsupportedFeed`. The public params union is open for future feed algorithms.
 
 `limit` counts the cards a page is built from, from 1 to 50 (default 20). A group is one card, but a group of fewer than 3 rows is returned as separate records, so a page holds between `limit` and `2 × limit` items, and fewer when the end of the data or the request's row budget ends it first (see [Groups](#groups)). Send a returned cursor back as the top-level request `cursor`, never inside `params`.
+
+### Following feed
+
+The following feed (`app.gainforest.feed.defs#followingFeed`) holds what the accounts a viewer follows have published: the same items, groups, pages, `limit`, and cursor format as the activity feed, restricted to the viewer's follows. It takes `app.gainforest.feed.defs#followingFeedParams`:
+
+| Param       | Default                  | Meaning                                                                                              |
+| ----------- | ------------------------ | ---------------------------------------------------------------------------------------------------- |
+| `filter`    | `all`                    | `all`, `project`, `observation`, `organization`, `post`, or `audio`. Reposts appear only with `all`. |
+| `viewerDid` | the authenticated caller | The account whose follows scope the feed. Required for an anonymous request.                         |
+
+```bash
+curl -sS http://localhost:3000/xrpc/app.gainforest.feed.getFeed \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer <service-auth-jwt>' \
+  --data '{ "feedId": "app.gainforest.feed.defs#followingFeed", "limit": 20 }'
+```
+
+- **The viewer.** An authenticated request is for its verified caller: `params` and `viewerDid` may be left out, and a `viewerDid` that names anyone else is rejected with `InvalidRequest`. An anonymous request has nobody to default to: it must send `params` with the `followingFeedParams` `$type` and a `viewerDid` (`InvalidRequest` otherwise). Anyone can therefore ask for any account's following feed anonymously. That is intended: follow records and the records they lead to are public, so the feed shows nothing the repositories do not already show.
+- **Follows.** The viewer follows the subjects of their valid `app.certified.graph.follow` records. A viewer who follows nobody gets an empty page, and the service reads no collection for it. A viewer who follows more than 500 accounts gets the 500 most recently followed (an account followed twice counts once), which bounds what a statement reads for the followed accounts. It does not bound reading the follow records themselves, which is linear in how many the viewer has: about 100 ms per statement at 30,000 follow records and 200 ms at 100,000. An anonymous caller can name any account as the viewer, so that cost follows the largest follower.
+- **What is in it.** The selection rules are the activity feed's (valid rows, the date range, projects, top-level posts, reposts with a valid subject of another account, observations, organizations), for the accounts the viewer follows. A repost is the reposting account's. A recording belongs to the owner of its recorder folder, not to the account that stored it: it is in the feed when a followed account owns the folder, and then it is shown with the owner's group. So a recording another account stored in a followed account's folder is included, and a recording a followed account stored in a folder someone else owns is not. A followed account's own recordings, those without a folder, in its own folder, or in a folder named by a handle or anything else that is not a valid DID, are in the feed as for the activity feed. A recording that another account stored is found through the deployment record that is its folder, so it needs that record to exist and to be valid.
+- **Cursors** belong to the feed that issued them: `#followingFeed` rejects an activity cursor, and `#activityFeed` a following cursor, with `InvalidCursor`.
 
 ### getFeed response
 
@@ -128,14 +149,14 @@ sequenceDiagram
     participant XRPC as XRPC Handler
     participant Service as FeedService
     participant Registry as Feed Registry
-    participant Feed as Activity Feed (SQL)
+    participant Feed as Activity or Following Feed (SQL)
     participant DB as Hyperindex PostgreSQL
 
     Client->>HTTP: POST feed procedure + optional Bearer JWT
     HTTP->>XRPC: Bounded, validated JSON
     XRPC->>XRPC: Verify audience, expiry, lxm, #atproto signature
     XRPC->>XRPC: Validate and consume issuer-scoped jti
-    XRPC->>Service: Endpoint input (the verified caller is not passed on)
+    XRPC->>Service: Endpoint input (for the following feed, the verified caller becomes its viewer)
     Service->>Registry: Load page
     Registry->>Feed: Dispatch feedId, params, and pagination
     Feed->>DB: Batches of 500 rows, at most 10 statements
@@ -163,6 +184,7 @@ sequenceDiagram
 - The feed reads only rows Hyperindex marks `validation_status = 'valid'`, the rows its typed GraphQL collections return. It excludes rows whose `createdAt` Hyperindex could not parse, and rows whose `createdAt` is before 1970 or more than five minutes in the future. `createdAt` is client-declared: a year-10000 record cannot be formatted as a datetime, and a record dated 2099 would otherwise sit at the top of the feed for good.
 - Projects are `org.hypercerts.collection` records typed `project` or `Project`. Observations are `app.gainforest.dwc.occurrence`. Organizations are `app.certified.actor.organization`. Posts are top-level `app.gainforest.feed.post` records without a `community-event` tag. Reposts are `app.gainforest.feed.repost` records whose subject still exists as a valid observation, as a project typed `project` or `Project`, or as a top-level post without a `community-event` tag, owned by another account. Audio is `app.gainforest.ac.audio`.
 - **Grouping ignores the rows around a group.** Observations of one account and recordings of one owner and folder fold into one card whatever other rows lie between them, as long as each is within 12 hours of the group's previous row. A group of fewer than 3 rows is returned as separate records. Bioacoustic sightings never group.
+- **The following feed starts from the followed accounts.** It keeps the same rules for what a record is, and adds the follow scope: a record of a followed account, a repost by one, and a recording whose folder a followed account owns. A recording that another account stored counts only through the folder's own record: the folder's `app.gainforest.ac.deployment` record has to exist and be valid, which the activity feed does not ask.
 - Audio groups are keyed by owner and folder. A recording that names a recorder folder (`deploymentRef` is an AT-URI) belongs to that folder, and the account in the folder's AT-URI owns the group, whoever stored the recording. A recording without a folder, or whose folder names a handle (or anything else that is not a valid DID) instead of a DID, belongs to its own account. A recording that is not part of a group is a `recordItem` of kind `audio` and names the account that stored it.
 - The cursor is unpadded base64url JSON with a version, scoped to the feed. It points at the last row the previous page consumed and holds nothing a record controls. It is an unsigned token held by the client: the service uses it only to position that client's own page. A cursor whose timestamp is not a real date, or that an earlier version issued, is rejected with `InvalidCursor`: request the first page again.
 - Results are mutable current state, not a snapshot across requests.
@@ -171,12 +193,9 @@ sequenceDiagram
 
 - A page is built from batches of 500 rows, newest first, after the cursor. Most requests need one statement. A request that folds a long dump needs one per 500 rows it consumes, never more than 10, so it never consumes more than 5,000 rows. A statement is a plain read of those rows; grouping happens in the service.
 - A statement that exceeds the database statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`) is an outage and returns `InternalError`. A request is bounded by 10 of them.
+- The following feed's statement starts from the viewer's followed accounts and reads each account's records through Hyperindex's author index, so what it costs depends on how many accounts the viewer follows and how much they stored, not on the size of the collections. Recordings are the exception, because Hyperindex has no index on `deploymentRef`. Recordings that other accounts stored in a followed account's folder are found by walking the audio collection, only for a viewer whose follows own a folder. A followed account's own recordings are read in full on every statement, about 2 to 4 microseconds each: nothing for an account with hundreds, noticeable for one with tens of thousands, an organization with a large archive of its own recordings included. The measurements, the plan, and the index to propose to the Hyperindex owners are in [`docs/database-contract.md`](docs/database-contract.md#the-following-feed).
 - The service never makes extra queries to hydrate or refill items.
 - Each page is a separate database read. Changes made between requests may appear on later pages.
-
-### Planned
-
-**A separate following feed.** Following is not part of `activityFeed` and not part of this release. It is planned as its own feed id (`#followingFeed`) with its own params definition in the `params` open union, and a follow-driven query: it starts from the followed accounts and reads them through the author index (`idx_record_timeline_author_collection_created`) instead of walking each collection. Audio ownership through the recorder folder still has to be handled for that query, because a recording's owner is the folder's owner, not the account that stored it (see [`docs/database-contract.md`](docs/database-contract.md)).
 
 ## Runtime configuration
 
@@ -220,7 +239,7 @@ GRANT SELECT ON TABLE public.record TO gainforest_feed_reader;
 ALTER ROLE gainforest_feed_reader SET default_transaction_read_only = on;
 ```
 
-The service has no migrations or feed tables of its own. It needs Hyperindex migration 010 (`record_created_at` and its timeline indexes) and migration 012 (`validation_status`). `/ready` checks that the database can be reached, PostgreSQL 16 can safely validate JSON text, the session is read-only, and the role can read the `record` columns the feed uses. It does not check migration history, indexes, or ingestion freshness. See [`docs/database-contract.md`](docs/database-contract.md) for the runtime schema contract, the indexes the feed relies on, and index proposals for the Hyperindex owners.
+The service has no migrations or feed tables of its own. It needs Hyperindex migration 010 (`record_created_at` and its timeline indexes, among them the author index the following feed reads), migration 012 (`validation_status`), and the `(did, collection)` index of migration 001. `/ready` checks that the database can be reached, PostgreSQL 16 can safely validate JSON text, the session is read-only, and the role can read the `record` columns the feed uses. It does not check migration history, indexes, or ingestion freshness. See [`docs/database-contract.md`](docs/database-contract.md) for the runtime schema contract, the indexes the feed relies on, and index proposals for the Hyperindex owners.
 
 ## Development
 
@@ -284,7 +303,7 @@ METRICS_HOST=0.0.0.0
 METRICS_PORT=3001
 ```
 
-Configure a compatible Prometheus collector to read `http://<private-service-host>:3001/metrics`. The `GET /metrics` response uses Prometheus-compatible exposition format. The listener has no application-level authentication, so do not attach a public domain or TCP proxy to the metrics port. Each replica exposes only its current in-memory registry; the collector owns aggregation, retention, and historical data. When `METRICS_PORT` is unset or empty, the metrics listener is disabled. `/metrics` remains unavailable on the public application port. Metric names keep the `hypercerts_feed_` prefix from the service this one was forked from.
+Configure a compatible Prometheus collector to read `http://<private-service-host>:3001/metrics`. The `GET /metrics` response uses Prometheus-compatible exposition format. The listener has no application-level authentication, so do not attach a public domain or TCP proxy to the metrics port. Each replica exposes only its current in-memory registry; the collector owns aggregation, retention, and historical data. When `METRICS_PORT` is unset or empty, the metrics listener is disabled. `/metrics` remains unavailable on the public application port. Metric names keep the `hypercerts_feed_` prefix from the service this one was forked from. The database duration histogram `hypercerts_feed_database_duration_seconds` has an `operation` label (`feed`: one whole page request of up to 10 statements; or `readiness`) and, for `feed`, a `feed` label naming the registered feed (`activity` or `following`), so the latencies of the two feeds, whose costs differ, can be told apart. The label is a closed list and never carries caller input.
 
 Set per-IP rate limits at the gateway. The first public policy allows 60 feed requests per minute for each client IP, with a burst of 20. When a client exceeds the limit, return HTTP 429 with `Retry-After`. Keep health and readiness private and outside this public limit. Adjust the limits using measured query response time and pool saturation.
 

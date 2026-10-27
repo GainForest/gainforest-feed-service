@@ -67,6 +67,7 @@ const createFeed = (
     { database: emptyDatabase, metrics },
     {
       id: feedId,
+      metricName: 'activity',
       params: {
         type: paramsType,
         ...(defaults === undefined ? {} : { default: defaults }),
@@ -259,7 +260,7 @@ describe('defineSqlFeed', () => {
 
     const exposition = await metrics.registry.metrics()
     expect(exposition).toContain(
-      'hypercerts_feed_database_duration_seconds_count{operation="feed"} 1',
+      'hypercerts_feed_database_duration_seconds_count{operation="feed",feed="activity"} 1',
     )
     expect(exposition).toContain(
       'hypercerts_feed_result_kinds_total{kind="post"} 1',
@@ -276,6 +277,7 @@ describe('defineSqlFeed', () => {
       { database: emptyDatabase, metrics },
       {
         id: feedId,
+        metricName: 'following',
         params: {
           type: paramsType,
           parse: (input: FeedParams) => ({ $type: input.$type }),
@@ -288,7 +290,7 @@ describe('defineSqlFeed', () => {
 
     await expect(feed.loadPage({ $type: paramsType }, {})).rejects.toBe(failure)
     expect(await metrics.registry.metrics()).toContain(
-      'hypercerts_feed_database_duration_seconds_count{operation="feed"} 1',
+      'hypercerts_feed_database_duration_seconds_count{operation="feed",feed="following"} 1',
     )
   })
 })

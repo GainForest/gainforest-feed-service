@@ -23,15 +23,37 @@ describe('Metrics', () => {
   // the statement timeout, so it can take much longer than one statement.
   it('counts a feed request of 20 seconds in a finite bucket', async () => {
     const metrics = new Metrics()
-    metrics.observeDatabase('feed', 20)
+    metrics.observeDatabase('feed', 20, 'activity')
 
     const exposition = await metrics.registry.metrics()
 
     expect(exposition).toContain(
-      'hypercerts_feed_database_duration_seconds_bucket{le="10",operation="feed"} 0',
+      'hypercerts_feed_database_duration_seconds_bucket{le="10",operation="feed",feed="activity"} 0',
     )
     expect(exposition).toContain(
-      'hypercerts_feed_database_duration_seconds_bucket{le="25",operation="feed"} 1',
+      'hypercerts_feed_database_duration_seconds_bucket{le="25",operation="feed",feed="activity"} 1',
+    )
+  })
+
+  // The following feed is the slower, viewer-dependent one, so operators need
+  // its requests apart from the activity feed's. The label is a closed list.
+  it('keeps one series per feed, and none for the readiness check', async () => {
+    const metrics = new Metrics()
+    metrics.observeDatabase('feed', 0.02, 'activity')
+    metrics.observeDatabase('feed', 0.3, 'following')
+    metrics.observeDatabase('feed', 0.4, 'following')
+    metrics.observeDatabase('readiness', 0.01)
+
+    const exposition = await metrics.registry.metrics()
+
+    expect(exposition).toContain(
+      'hypercerts_feed_database_duration_seconds_count{operation="feed",feed="activity"} 1',
+    )
+    expect(exposition).toContain(
+      'hypercerts_feed_database_duration_seconds_count{operation="feed",feed="following"} 2',
+    )
+    expect(exposition).toContain(
+      'hypercerts_feed_database_duration_seconds_count{operation="readiness"} 1',
     )
   })
 
@@ -40,6 +62,9 @@ describe('Metrics', () => {
 
     expect(exposition).toContain(
       'The feed operation is one whole page request, which sends up to 10 statements.',
+    )
+    expect(exposition).toContain(
+      'Its feed label names the registered feed: activity or following.',
     )
   })
 })

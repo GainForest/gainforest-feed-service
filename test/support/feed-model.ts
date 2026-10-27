@@ -1,6 +1,7 @@
 import { isAtUriString } from '@atproto/syntax'
 
 import { uriOf, type SeedRecord } from './hyperindex-fixture.js'
+import { MAX_FOLLOWED_ACCOUNTS } from '../../src/feed/following.js'
 import { BATCH_ROWS, REQUEST_ROWS } from '../../src/feed/query.js'
 import { GROUP_SAMPLE_SIZE, MIN_GROUP_ROWS } from '../../src/feed/types.js'
 
@@ -13,7 +14,9 @@ import { GROUP_SAMPLE_SIZE, MIN_GROUP_ROWS } from '../../src/feed/types.js'
  *
  * The rules, in one place:
  *
- *   - Rows are the selectable records, newest first (ties by URI).
+ *   - Rows are the selectable records, newest first (ties by URI). The
+ *     following feed keeps only those of the accounts the viewer follows,
+ *     see `ModelFollowing`.
  *   - A group is audio by (owner, folder) or observations by account. Other
  *     kinds, and bioacoustic sightings, stand alone.
  *   - A row joins its group's latest card when it is no more than 12 hours
@@ -66,12 +69,33 @@ export interface ModelPage {
   readonly statements: number
 }
 
+/**
+ * The follow scope of the following feed, read from the records themselves:
+ *
+ *   - The followed accounts are the subjects of the viewer's valid follow
+ *     records, newest follow first (an account at its newest follow record,
+ *     so an account followed twice counts once), the first
+ *     `maxFollowedAccounts` of them.
+ *   - A record belongs to the account that stored it, a repost to the
+ *     reposter, and a recording to the owner of its folder.
+ *   - A followed account's own recordings count when it owns them: no folder,
+ *     a folder it owns, or a folder whose authority is not a DID.
+ *   - Recordings that belong to another account, whoever stored them, count
+ *     when `deploymentRef` is the URI of a valid deployment record that a
+ *     followed account stores.
+ */
+export interface ModelFollowing {
+  readonly viewer: string
+  readonly maxFollowedAccounts?: number
+}
+
 export interface ModelOptions {
   readonly filter: string
   readonly limit: number
   readonly uriRank?: ReadonlyMap<string, number>
   readonly batchRows?: number
   readonly requestRows?: number
+  readonly following?: ModelFollowing
 }
 
 interface Row {
@@ -83,6 +107,8 @@ interface Row {
   readonly index: number
 }
 
+const FOLLOW = 'app.certified.graph.follow'
+const DEPLOYMENT = 'app.gainforest.ac.deployment'
 const GROUP_GAP_MS = 12 * 60 * 60 * 1000
 const FUTURE_TOLERANCE_MS = 5 * 60 * 1000
 const REPOST_SUBJECT_KINDS = new Set(['post', 'observation', 'project'])
@@ -236,13 +262,82 @@ const newestFirstBy =
     return a.uri < b.uri ? 1 : -1
   }
 
+const isValid = (record: SeedRecord): boolean =>
+  (record.validation ?? 'valid') === 'valid'
+
+/**
+ * The accounts the viewer follows: subjects of the viewer's valid follow
+ * records whose subject is a string, newest follow first (a follow without a
+ * createdAt last, ties by URI). An account is placed by its newest follow
+ * record, and the first `max` accounts, not records, are kept.
+ */
+const followedAccounts = (
+  records: readonly SeedRecord[],
+  following: ModelFollowing,
+  uriRank: ReadonlyMap<string, number> | undefined,
+): ReadonlySet<string> => {
+  const follows = records.filter(
+    (record) =>
+      isValid(record) &&
+      record.collection === FOLLOW &&
+      record.did === following.viewer &&
+      typeof record.json?.subject === 'string',
+  )
+  const newestFirst = (a: SeedRecord, b: SeedRecord): number => {
+    if (a.createdAt !== b.createdAt) {
+      if (a.createdAt === null) return 1
+      if (b.createdAt === null) return -1
+      return Date.parse(b.createdAt) - Date.parse(a.createdAt)
+    }
+    if (uriRank !== undefined) {
+      return (uriRank.get(uriOf(a)) ?? 0) - (uriRank.get(uriOf(b)) ?? 0)
+    }
+    return uriOf(a) < uriOf(b) ? 1 : -1
+  }
+  follows.sort(newestFirst)
+  // A set keeps the first, so the newest, follow record of each account.
+  const accounts = [
+    ...new Set(follows.map((record) => String(record.json?.subject))),
+  ]
+  return new Set(
+    accounts.slice(0, following.maxFollowedAccounts ?? MAX_FOLLOWED_ACCOUNTS),
+  )
+}
+
+/** Whether a row of a followed account's feed is in the viewer's scope. */
+const inFollowScope = (
+  record: SeedRecord,
+  kind: string,
+  followed: ReadonlySet<string>,
+  folders: ReadonlySet<string>,
+): boolean => {
+  if (kind !== 'audio') return followed.has(record.did)
+  const { owner, folder } = audioKey(record)
+  if (owner === record.did) return followed.has(record.did)
+  return folder !== null && folders.has(folder)
+}
+
 /** The selectable rows for a filter, newest first. */
 const selectRows = (
   records: readonly SeedRecord[],
-  options: Pick<ModelOptions, 'filter' | 'uriRank'>,
+  options: Pick<ModelOptions, 'filter' | 'uriRank' | 'following'>,
 ): Row[] => {
-  const isValid = (record: SeedRecord): boolean =>
-    (record.validation ?? 'valid') === 'valid'
+  const followed =
+    options.following === undefined
+      ? undefined
+      : followedAccounts(records, options.following, options.uriRank)
+  const folders = new Set(
+    followed === undefined
+      ? []
+      : records
+          .filter(
+            (record) =>
+              isValid(record) &&
+              record.collection === DEPLOYMENT &&
+              followed.has(record.did),
+          )
+          .map(uriOf),
+  )
   // A repost resolves when its subject is a valid record that would itself be
   // a feed record; the subject's own createdAt only decides whether the
   // subject is in the feed.
@@ -256,6 +351,12 @@ const selectRows = (
     const kind = kindOf(record)
     if (kind === undefined) continue
     if (options.filter !== 'all' && options.filter !== kind) continue
+    if (
+      followed !== undefined &&
+      !inFollowScope(record, kind, followed, folders)
+    ) {
+      continue
+    }
     if (kind === 'repost') {
       const subject = byUri.get(repostSubjectUri(record))
       const subjectKind = subject === undefined ? undefined : kindOf(subject)
@@ -282,7 +383,7 @@ const selectRows = (
 /** The AT-URIs of every selectable row, newest first. */
 export const modelRowUris = (
   records: readonly SeedRecord[],
-  options: Pick<ModelOptions, 'filter' | 'uriRank'>,
+  options: Pick<ModelOptions, 'filter' | 'uriRank' | 'following'>,
 ): string[] => selectRows(records, options).map((row) => row.uri)
 
 interface Card {

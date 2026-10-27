@@ -5,6 +5,7 @@ import { createApp } from './app.js'
 import { createConfiguredServiceAuth } from './auth/service-auth.js'
 import { loadConfig } from './config.js'
 import { Database } from './database.js'
+import { createFollowingFeed } from './feed/following.js'
 import { createActivityFeed } from './feed/query.js'
 import { FeedRegistry } from './feed/registry.js'
 import { FeedService } from './feed/service.js'
@@ -22,7 +23,8 @@ const logger = pino({ level: config.logLevel })
 const metrics = new Metrics()
 const database = new Database(config, logger)
 const activityFeed = createActivityFeed({ database, metrics })
-const feeds = new FeedRegistry([activityFeed])
+const followingFeed = createFollowingFeed({ database, metrics })
+const feeds = new FeedRegistry([activityFeed, followingFeed])
 const feedService = new FeedService(feeds)
 const auth = createConfiguredServiceAuth(config)
 const app = createApp(

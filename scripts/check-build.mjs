@@ -1,6 +1,7 @@
 await import(new URL('../dist/api/get-feed-skeleton.js', import.meta.url))
 await import(new URL('../dist/api/get-feed.js', import.meta.url))
 await import(new URL('../dist/feed/query.js', import.meta.url))
+await import(new URL('../dist/feed/following.js', import.meta.url))
 await import(new URL('../dist/feed/registry.js', import.meta.url))
 await import(new URL('../dist/feed/sql-feed.js', import.meta.url))
 await import(new URL('../dist/feed/service.js', import.meta.url))

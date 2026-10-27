@@ -9,6 +9,12 @@ import {
 import type { FeedErrorCode } from './feed/errors.js'
 import type { FeedItemKind } from './feed/types.js'
 
+/**
+ * The registered feeds, as the `feed` label of the database duration histogram.
+ * A closed list: a new feed adds its name here, so the label stays bounded.
+ */
+export type FeedMetricName = 'activity' | 'following'
+
 const boundedHttpMethod = (method: string): 'GET' | 'POST' | 'OTHER' => {
   if (method === 'GET' || method === 'POST') return method
   return 'OTHER'
@@ -19,7 +25,7 @@ export class Metrics {
   readonly registry = new Registry()
   readonly #requests: Counter<'route' | 'method' | 'status'>
   readonly #requestDuration: Histogram<'route' | 'method'>
-  readonly #databaseDuration: Histogram<'operation'>
+  readonly #databaseDuration: Histogram<'operation' | 'feed'>
   readonly #resultItems: Histogram
   readonly #resultKinds: Counter<'kind'>
   readonly #errors: Counter<'error'>
@@ -46,8 +52,8 @@ export class Metrics {
     })
     this.#databaseDuration = new Histogram({
       name: 'hypercerts_feed_database_duration_seconds',
-      help: 'Database operation duration. The feed operation is one whole page request, which sends up to 10 statements.',
-      labelNames: ['operation'],
+      help: 'Database operation duration. The feed operation is one whole page request, which sends up to 10 statements. Its feed label names the registered feed: activity or following.',
+      labelNames: ['operation', 'feed'],
       buckets: [
         0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50,
       ],
@@ -95,13 +101,25 @@ export class Metrics {
 
   /**
    * Records the duration of one named database operation. A `feed` operation
-   * is a whole page request: up to 10 statements, one after the other.
+   * is a whole page request: up to 10 statements, one after the other. It
+   * carries the registered feed, so the activity and following feeds, whose
+   * costs differ, are separate series; the readiness check has no feed.
    */
+  observeDatabase(operation: 'readiness', durationSeconds: number): void
+  observeDatabase(
+    operation: 'feed',
+    durationSeconds: number,
+    feed: FeedMetricName,
+  ): void
   observeDatabase(
     operation: 'feed' | 'readiness',
     durationSeconds: number,
+    feed?: FeedMetricName,
   ): void {
-    this.#databaseDuration.observe({ operation }, durationSeconds)
+    this.#databaseDuration.observe(
+      feed === undefined ? { operation } : { operation, feed },
+      durationSeconds,
+    )
   }
 
   /** Records generated page size and its bounded item-kind distribution. */

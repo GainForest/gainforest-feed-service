@@ -57,6 +57,8 @@ const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
 const createdAt = '2026-07-21T10:00:00.000Z'
 const feedId = 'app.gainforest.feed.defs#activityFeed'
 const paramsType = 'app.gainforest.feed.defs#activityFeedParams'
+const followingFeedId = 'app.gainforest.feed.defs#followingFeed'
+const followingParamsType = 'app.gainforest.feed.defs#followingFeedParams'
 
 const feedRequest = {
   feedId,
@@ -123,10 +125,17 @@ describe('feed Lexicon contract', () => {
     expect(valueAt(feedMain, 'input', 'schema', 'required')).toEqual(['feedId'])
     expect(
       valueAt(feedMain, 'input', 'schema', 'properties', 'feedId'),
-    ).toMatchObject({ type: 'string', knownValues: [feedId] })
+    ).toMatchObject({
+      type: 'string',
+      knownValues: [feedId, followingFeedId],
+    })
     expect(
       valueAt(feedMain, 'input', 'schema', 'properties', 'params'),
-    ).toMatchObject({ type: 'union', closed: false, refs: [paramsType] })
+    ).toMatchObject({
+      type: 'union',
+      closed: false,
+      refs: [paramsType, followingParamsType],
+    })
 
     const errors = valueAt(feedMain, 'errors')
     expect(errors).toEqual(
@@ -164,10 +173,10 @@ describe('feed Lexicon contract', () => {
         valueAt(main, 'input', 'schema', 'properties', 'params', 'description'),
       ).toContain('Optional for app.gainforest.feed.defs#activityFeed')
       expect(valueAt(main, 'description')).toContain(
-        'Omitting params selects the global feed.',
+        'omitting params selects the global feed',
       )
       expect(valueAt(main, 'description')).toContain(
-        'does not depend on the caller',
+        'activity feed does not depend on the caller',
       )
     }
     expect(valueAt(defs, 'activityFeedParams', 'description')).toContain(
@@ -196,6 +205,64 @@ describe('feed Lexicon contract', () => {
           },
         }),
       ).not.toThrow()
+    }
+  })
+
+  it('defines the following feed with the activity feed filter and an optional viewer', () => {
+    const properties = objectAt(defs, 'followingFeedParams', 'properties')
+
+    expect(Object.keys(properties)).toEqual(['filter', 'viewerDid'])
+    // The filter is the activity feed's, value for value.
+    expect(valueAt(properties, 'filter')).toEqual(
+      valueAt(defs, 'activityFeedParams', 'properties', 'filter'),
+    )
+    expect(valueAt(properties, 'viewerDid')).toMatchObject({
+      type: 'string',
+      format: 'did',
+    })
+    expect(valueAt(defs, 'followingFeedParams', 'required')).toBeUndefined()
+    expect(valueAt(defs, 'followingFeed', 'type')).toBe('token')
+    for (const main of [feedMain, skeletonMain]) {
+      expect(
+        valueAt(main, 'input', 'schema', 'properties', 'params', 'description'),
+      ).toContain('anonymous request must send followingFeedParams')
+      expect(valueAt(main, 'description')).toContain(
+        'following feed returns, in the same form',
+      )
+    }
+  })
+
+  it('leaves the activity feed definitions to the activity feed', () => {
+    // Additive only: a client built against the activity feed sees no change.
+    expect(
+      Object.keys(objectAt(defs, 'activityFeedParams', 'properties')),
+    ).toEqual(['filter'])
+    for (const parser of [skeletonInput, feedInput]) {
+      const parsed = parser.schema.$parse({
+        feedId: followingFeedId,
+        params: { $type: followingParamsType },
+      })
+      expect(parsed.params).toEqual({
+        $type: followingParamsType,
+        filter: 'all',
+      })
+    }
+  })
+
+  it('validates viewerDid as a DID on both procedures', () => {
+    for (const parser of [skeletonInput, feedInput]) {
+      expect(() =>
+        parser.schema.$parse({
+          feedId: followingFeedId,
+          params: { $type: followingParamsType, viewerDid: actorDid },
+        }),
+      ).not.toThrow()
+      expect(() =>
+        parser.schema.$parse({
+          feedId: followingFeedId,
+          params: { $type: followingParamsType, viewerDid: 'not-a-did' },
+        }),
+      ).toThrow()
     }
   })
 

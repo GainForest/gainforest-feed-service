@@ -23,7 +23,7 @@ record.record_created_at   timestamptz, nullable   (migration 010)
 record.validation_status   text, not null          (migration 012)
 ```
 
-The canonical migrations are the files in `internal/database/migrations/postgres` in the Hyperindex repository (001 through 014 on `main` at the time of writing). The older `db/migrations_postgres` directory stops at migration 004 and is not what Hyperindex applies. The service needs exactly two of them: **migration 010** for `record_created_at` and its timeline indexes, and **migration 012** for `validation_status`. Later migrations are not required.
+The canonical migrations are the files in `internal/database/migrations/postgres` in the Hyperindex repository (001 through 014 on `main` at the time of writing). The older `db/migrations_postgres` directory stops at migration 004 and is not what Hyperindex applies. The service needs these: **migration 010** for `record_created_at` and its timeline indexes (the author index the following feed reads is one of them), **migration 012** for `validation_status`, and the `(did, collection)` index of **migration 001**, which the following feed reads its follows and folders through. Later migrations are not required.
 
 The service does not read `actor`, `label`, or any other Hyperindex table, and it does not read handles.
 
@@ -64,7 +64,7 @@ The kinds, by collection:
 
 Donations (`org.hypercerts.funding.receipt`) and every other collection are never selected.
 
-**Selection does not depend on the caller.** The statement takes the active kinds, the cursor position, and the batch size, and nothing that identifies who asks: no viewer, no follow records, no owner scope. Every caller gets the same rows for the same request, with or without a service-auth token. Following is planned as a separate feed (see the follow-ups below).
+**The activity feed's selection does not depend on the caller.** Its statement takes the active kinds, the cursor position, and the batch size, and nothing that identifies who asks: no viewer, no follow records, no owner scope. Every caller gets the same rows for the same request, with or without a service-auth token. The following feed is a separate feed with its own statement, described in [The following feed](#the-following-feed).
 
 ### Order and cursor
 
@@ -126,6 +126,115 @@ Most rows of each collection should be `valid`. The service deliberately has no 
 
 **`record_created_at` is not the GraphQL sort key.** Hyperindex fills `record_created_at` with the first valid `createdAt` it sees, truncated to milliseconds, and never overwrites a non-null value on update (`COALESCE(record.record_created_at, EXCLUDED.record_created_at)`). Its typed GraphQL `sortBy: createdAt` sorts on the JSON `createdAt` text instead. The two orders agree for normalized `Z` timestamps. They can differ for `createdAt` strings written with an offset or with different fractional precision, and for records whose JSON `createdAt` was edited after the first ingest. The service orders by `record_created_at`, and the app hydrates by URI, so the service order decides the feed.
 
+## The following feed
+
+`#followingFeed` selects the same rows as the activity feed, for the accounts a viewer follows, and returns them in the same cards, pages, and cursor. It has its own statement, `src/feed/following-query.sql`, because it starts from different data: the followed accounts, not the collections. The batch loop and the page builder are the activity feed's, so the statement is still "the next 500 rows after the cursor".
+
+### What it selects
+
+- **The viewer's follows.** The subjects of the viewer's `app.certified.graph.follow` records that Hyperindex marked `valid` and whose `subject` is a string. An account counts once, at its newest follow record, and accounts are ordered newest follow first (`record_created_at DESC NULLS LAST`, then the follow record's `uri DESC`). The statement keeps at most 500 **accounts**, so several follow records of one account never use up the cap, and a viewer who follows more gets the 500 most recently followed. A viewer who follows nobody gets an empty page, and the statement reads no collection.
+  - **What the cap bounds.** It bounds what a statement reads _for the followed accounts_: a few index reads per account and kind, and the rows those accounts stored. An anonymous caller can name any account as the viewer, so this matters.
+  - **What it does not bound.** The read of the viewer's follow records. The statement reads every one (through `idx_record_did_collection`, so that a follow whose `createdAt` Hyperindex could not parse still counts, which the partial author index cannot return) and sorts them to find each account's newest. That is linear in the viewer's follow records, a little more for the sort: about 10 ms at 50 follows, about 100 ms at 30,000 follow records, and about 210 ms at 100,000 (measured on the evidence table below). The review measured 100 to 130 ms at 30,000 and 100,000 follow records before accounts were counted once; counting them once costs the sort. Cost therefore follows the largest follower in the database.
+- **Records of followed accounts.** Projects, observations, organizations, and posts whose `did` is a followed account, and reposts that a followed account made. Every other rule is the activity feed's: `valid`, the range guard, the project type, no replies or `community-event` posts, a repost subject that is a valid feed record of another account.
+- **Recordings belong to the owner of their folder**, derived by the activity statement's `audio_keyed` expression, which the following statement repeats word for word. A unit test keeps the two identical, and `audioKey` in the model is the third copy. Two sets of recordings are in the feed:
+  - Recordings a followed account stored **and owns**: no folder, a folder in its own repository, or a folder whose authority is a handle or anything else that is not a valid DID. They are read through the author index, in order, from the cursor.
+  - Recordings **whose owner is another account**, whoever stored them (including another followed account), when `deploymentRef` is the AT-URI of a valid `app.gainforest.ac.deployment` record that a followed account stores. This is how a follower of an organization sees the recordings its members stored in the organization's folders.
+
+  So a recording a followed account stored in a folder that nobody followed owns is **not** in the feed, and neither is a recording another account stored in a folder that does not exist (or is not valid), unless a followed account stored it itself in a folder it owns. The activity feed derives the owner from the AT-URI without looking the folder up; the following feed looks the folder up for recordings that other accounts stored, because that is the only way to find them without scanning the whole audio collection (see [the gap](#the-gap-recordings-by-folder)).
+
+### Plan shape
+
+```text
+follows            one row per followed account (its newest follow record places it), newest first, at most $6
+folders            deployment records of the followed accounts (one index read per account)
+authored           for every kind, one LATERAL read per followed account of the account's records,
+                   in index order from the cursor, LIMIT (SELECT $4); the union keeps the newest $4
+batch_end          the last row of `authored` when it holds a full batch, else the oldest position
+folder_audio       recordings of other accounts in the followed folders, newest first from the cursor
+                   and not older than batch_end; skipped when `folders` is empty
+final              the newest $4 of authored + folder_audio; the bioacoustic flag read by primary key
+```
+
+Each read of `authored` walks `idx_record_timeline_author_collection_created` (`did, collection, record_created_at DESC, uri DESC`) with the cursor as an index condition, or `idx_record_did_collection` for a kind of which an account stores few: the planner decides per account, and either way the read is bounded by what that account stored, never by the size of the collection. The choices that keep it so are in the SQL header: the limits are `(SELECT $n)` so the planner plans for the first tenth of the rows, the cursor is an inline predicate, `COALESCE(x IN (SELECT ...), false)` keeps the list of folders a hashed lookup (PostgreSQL estimates the CTE at one row and turns a plain `IN` into a nested loop that reads the whole list for every recording it checks; followed accounts are the outer side of the per-account reads, not a lookup), and the sidecar of an observation is read last, by primary key, for the observations of the batch only: the key is `CASE WHEN b.kind = 'observation' THEN b.uri END`, which is NULL for a row of any other kind and reads no page (as a separate kind condition the lookup read a page for every row first: 5 buffers per row, 3,330 against 830 buffers for a batch of 500 recordings).
+
+**Cost.** A statement costs, per followed account, an index read for each kind (tens of microseconds in all) plus the rows those accounts stored, up to 500 per account and kind. It does not cost anything for the size of the collections, except for `folder_audio` below. What a statement reads is visible in its plan: the `follows` read, one probe per account in `authored`, 500 primary key lookups in `final`.
+
+**Follows nobody.** `follows` is empty, so no read of `authored`, `folders`, or `folder_audio` runs: every one of them shows `never executed` in `EXPLAIN ANALYZE`, and the statement takes about a millisecond plus planning. A test asserts it from the plan.
+
+### The gap: recordings by folder
+
+Hyperindex has no index on `deploymentRef` (migrations 001 through 014; the JSON GIN index was dropped in migration 011), so a recording cannot be found by the folder it names or by the folder's owner, and the recordings of other accounts in a followed account's folders cannot be read like the rest. `folder_audio` is the one read that is not driven by an index on what it filters. The best plan available walks `idx_record_timeline_collection_created` for the audio collection, newest first from the cursor, and keeps the recordings whose `deploymentRef` is a folder of a followed account:
+
+- **It does not run** for a viewer whose follows own no folder (`folders` is empty): such a viewer never pays for it.
+- **It stops** after 500 matches, and it does not read recordings older than the last row of a full batch of what the followed accounts stored themselves (`batch_end`): when a request has other rows to show, the walk covers only the time they cover.
+- **Otherwise it reads every recording after the cursor**, about 2 microseconds each: a viewer whose follows store few rows and own a folder with few recordings pays for the whole audio collection, once per statement.
+- The read of a followed account's own recordings keeps only those it owns (`owner = did`), which no index can tell. PostgreSQL estimates a few dozen recordings per account and plans a bitmap scan of everything the account stored plus a sort, so it reads all of the account's recordings after the cursor, about 2 to 4 microseconds each, on every statement, whatever the limit says. With a cursor it reads only the rows after the cursor, and at some cursors the planner chooses the ordered scan instead, which stops at the limit, so the first pages of a request pay the most. This is not limited to uploader accounts that store into other accounts' folders: **a followed organization that stores a large archive of its own recordings pays it too** (the review measured 109 to 131 ms per statement for an organization with 30,000 recordings in its own folder, and 0.8 to 32 ms at deep cursors), and a request of 10 statements pays it 10 times. For an account with a few hundred recordings it is nothing; for ten accounts with 16,700 recordings each it is the 290 ms below. The owner index below answers it.
+
+The measurements below show both costs. What would remove them is an index on the **owner** of a recording, the expression `audio_keyed` computes (the account in the AT-URI of `deploymentRef` when it is a valid DID, else the account that stored it). Propose it to the Hyperindex owners; build it concurrently and decide whether the write cost on audio records is worth it:
+
+```sql
+CREATE INDEX CONCURRENTLY idx_record_audio_owner_created ON record (
+  (CASE WHEN json->>'deploymentRef' LIKE 'at://%'
+         AND length(split_part(json->>'deploymentRef', '/', 3)) <= 2048
+         AND split_part(json->>'deploymentRef', '/', 3) ~ '^did:[a-z]+:[A-Za-z0-9._:%-]*[A-Za-z0-9._-]$'
+        THEN split_part(json->>'deploymentRef', '/', 3)
+        ELSE did END),
+  record_created_at DESC, uri DESC)
+WHERE collection = 'app.gainforest.ac.audio'
+  AND validation_status = 'valid'
+  AND record_created_at IS NOT NULL;
+```
+
+With it, the statement would read the recordings a followed account owns with one ordered read per account, whoever stored them: no `folders`, no walk, no scan of an account's recordings in other folders, and no need for the folder record to exist, so the following feed would again derive the owner exactly as the activity feed does. The query must repeat the index expression and predicate as written. On the evidence table below it takes 22 MB for 153,100 audio rows, and a prototype of the statement over it gave the same rows with the times in the last column of the second table.
+
+### Evidence
+
+A throwaway local PostgreSQL 16.15 cluster with Hyperindex migrations 001 through 014 applied (all thirteen indexes of `record`), warm, `jit=off`, one connection. The table is 555 MB with its indexes: 150,000 observations (127,461 valid), 153,100 audio recordings (145,652 valid: ten recorder accounts that stored about 16,700 each, 70% of them in the folders of 100 organizations, and two dumps of 1,700 and 1,400 recordings in the last two hours), 5,000 posts, 2,000 collections, 100 organizations, 1,000 reposts, 302 deployment records, 4,112 follow records, and 25,000 donation receipts. Twenty accounts are prolific observers (3,000 observations each, about 25 a day for 240 days); 2,980 are light (about 30 each).
+
+The comparison is the approach this statement replaces: the activity statement with a filter by owner in every arm (`r.did IN (SELECT did FROM follows)`; recordings by their owner), through the same batch loop and page builder. Both return the same cards for every request below, statement by statement, except for the two viewers that follow more than 500 accounts, where the follow-driven statement reads the 500 most recent. One request is the wall-clock time of the feed's `loadPage` over every statement it sends (median of 3 to 7 runs, limit 20 unless noted); `stmts` is the number of statements.
+
+Viewers whose follows own no recorder folder:
+
+| Viewer (accounts followed)                  | Page        | stmts | Collection filter | Follow-driven |
+| ------------------------------------------- | ----------- | ----: | ----------------: | ------------: |
+| 20 prolific observers (20)                  | 1           |     1 |            334 ms |         31 ms |
+|                                             | 2           |     2 |            614 ms |         61 ms |
+|                                             | 3           |     1 |            318 ms |         29 ms |
+|                                             | 1, limit 50 |    10 |          3,033 ms |        301 ms |
+|                                             | 2, limit 50 |    10 |          2,697 ms |        305 ms |
+| 5 light accounts (5)                        | 1-3         |     1 |        428-461 ms |       9-10 ms |
+| 3 accounts that only post (3)               | 1           |     1 |            470 ms |        3.9 ms |
+| 50 light accounts (50)                      | 1-3         |     1 |        357-361 ms |      14-15 ms |
+| 1 prolific and 4 light accounts (5)         | 1-3         |     1 |        240-340 ms |         15 ms |
+| 1,000 light accounts (1,000, capped at 500) | 1-2         |     1 |        307-340 ms |      66-69 ms |
+| 3,000 accounts, 20 prolific (3,000, capped) | 1-2         |     1 |        323-325 ms |         83 ms |
+| Nobody (0)                                  | 1           |     1 |            3.3 ms |        3.1 ms |
+
+Viewers whose follows own a folder, so `folder_audio` runs, and viewers that follow recorder accounts:
+
+| Viewer (accounts followed)                              | Page | stmts | Collection filter |  Follow-driven |
+| ------------------------------------------------------- | ---- | ----: | ----------------: | -------------: |
+| 1 folder owner, no dump (1)                             | 1-2  |     1 |        251-260 ms |       87-88 ms |
+| 1 folder owner and 5 light accounts (6)                 | 1-2  |     1 |        144-145 ms |          90 ms |
+| 1 folder owner with the 3,100-recording dump (1)        | 1    |     4 |            698 ms |         109 ms |
+|                                                         | 2-3  |     1 |        254-269 ms |       92-96 ms |
+| 3 folder owners (2 with dumps) and 5 light accounts (8) | 1    |     7 |            112 ms |         143 ms |
+|                                                         | 2-3  |     1 |          61-64 ms |       42-44 ms |
+| 20 prolific observers and 1 folder owner (21)           | 1-3  |     1 |          14-20 ms |       32-37 ms |
+| 1 recorder account, all its rows in other folders (1)   | 1    |     1 |            463 ms |          36 ms |
+| 10 recorder accounts (10)                               | 1-2  |    10 |    1,364-1,538 ms | 2,655-2,938 ms |
+
+What the plans show (`EXPLAIN (ANALYZE, BUFFERS)`, first statement, all kinds):
+
+- **No whole-collection walk, except `folder_audio`.** For the 20 prolific observers the statement reads 10,000 rows through the author index (60 probes, 15,135 shared buffers) and the 20 accounts' follows, and `folder_audio` does not run (`loops=0`). For 1,000 follows it reads 14,000 rows through the author index and 33,376 buffers. For a viewer who follows nobody, 9 buffers, and every read shows `never executed`. The collection filter reads the whole audio collection for the 20 prolific observers (153,100 rows, 165,756 buffers for the statement), and the whole observation collection as well for five light accounts (150,000 more rows, 317,935 buffers).
+- **`folder_audio` is the one walk.** For a folder owner whose recordings are sparse it read 56,349 recordings (59,583 buffers for the statement, about 90 ms); bounded by `batch_end`, for a viewer who also follows 20 prolific observers, 4,649 recordings.
+- **A request costs its statements times one statement.** Most requests need one. A request that folds a long dump needs up to ten, and a followed account that stores much is what makes one: 300 ms against 3 seconds for the prolific observers.
+- **Where it is slower.** The follow-driven statement reads up to 500 rows per followed account and kind, where a walk of the collection stops after the first 500 rows it finds, so a viewer who follows prolific accounts and a folder owner at once takes 32-37 ms against 14-20 ms. Ten recorder accounts take longer (the last row): seven of them stored every recording in other accounts' folders, so each statement reads all of their recordings (about 120,000 rows, 290 ms) to find that none is theirs, where the walk stops at the first 500 matches among the other three. That is the cost of reading a followed account's own recordings, described above, at its worst, and it needs the owner index.
+- **The cap.** 500 followed accounts cost 66 to 83 ms per statement on this table, so a viewer who follows 1,000 or 3,000 accounts gets the 500 most recent in a fifth to a quarter of the time the collection filter takes. The cap bounds the work for the followed accounts, not the read of the viewer's follow records (see "The viewer's follows"): a viewer with 30,000 follow records costs about 100 ms a statement and one with 100,000 about 210 ms, on this table.
+- **With the proposed owner index** (22 MB here), the prototype returned the same rows statement by statement over eight viewers, with these times for one statement (the statement above in parentheses): folder owner without a dump 17 ms (88), folder owner and 5 light accounts 15 ms (94), one recorder account with its rows in other folders 4 ms (37), ten recorder accounts 16 ms (299), 20 prolific observers and a folder owner 29 ms (35). The others do not change.
+
+To check a plan on a database of your own, run the statement under `EXPLAIN (ANALYZE, BUFFERS)` in a read-only session with `jit = off` and `plan_cache_mode = force_custom_plan`, the bind values of `src/feed/following.ts` (the active kinds, `NULL`, `NULL`, `500`, the viewer's DID, `500`), and compare `follows`, `folders`, and the scans under `authored` and `folder_audio` with the shape above. Pick viewers with a few follows, with a few hundred, and one that follows an organization that owns folders.
+
 ## Indexes
 
 Hyperindex owns indexes. The service creates none and needs none beyond those Hyperindex already has.
@@ -136,10 +245,14 @@ Used today, all from existing migrations:
 idx_record_timeline_collection_created
   ON record (collection, record_created_at DESC, uri DESC)
   WHERE record_created_at IS NOT NULL                          -- migration 010
-record_pkey ON record (uri)                                    -- repost subject lookups
+idx_record_timeline_author_collection_created
+  ON record (did, collection, record_created_at DESC, uri DESC)
+  WHERE record_created_at IS NOT NULL                          -- migration 010
+idx_record_did_collection ON record (did, collection)          -- migration 001
+record_pkey ON record (uri)                                    -- repost subjects, bioacoustic sightings
 ```
 
-The per-kind arms walk `idx_record_timeline_collection_created`, in index order and only as far as the merged batch needs. The subject of each repost is read by primary key. The `scripts/test-hyperindex-schema.sh` preflight checks that `idx_record_timeline_collection_created` exists. It also still checks `idx_record_did_collection` (`record (did, collection)`, migration 001), which the activity feed statement does not read.
+The activity statement's per-kind arms walk `idx_record_timeline_collection_created`, in index order and only as far as the merged batch needs. The following statement reads each followed account through `idx_record_timeline_author_collection_created` (or `idx_record_did_collection` for kinds an account stores few of), reads the viewer's follows and the followed accounts' folders through `idx_record_did_collection`, and walks `idx_record_timeline_collection_created` only for the recordings of other accounts in followed folders (see [the gap](#the-gap-recordings-by-folder)). The subject of each repost and each observation's sidecar are read by primary key. The `scripts/test-hyperindex-schema.sh` preflight checks that the first three exist.
 
 ### Proposal for the Hyperindex owners
 
@@ -183,7 +296,6 @@ What keeps the plan this way is listed in the header of `src/feed/feed-query.sql
 
 Known follow-ups, deliberately not built:
 
-- **Planned: a separate following feed.** Following is not part of `activityFeed` and not part of this release. It is planned as its own feed id (`#followingFeed`) with its own params definition in the `params` open union, and a follow-driven query: it starts from the followed accounts and reads each one's records through the author index `idx_record_timeline_author_collection_created` (`did, collection, record_created_at DESC, uri DESC`), merging the results, instead of walking each collection and filtering by owner. Audio ownership through the recorder folder is still to be handled: the owner of a recording is the folder's owner from `deploymentRef`, not the account in `did`, so that index cannot find the recordings that other accounts stored in a followed account's folder, and the query would have to find the folders the followed accounts own as well as their own recordings.
 - A statement always asks each arm for up to 500 rows, so a request that needs a handful of rows still reads the rows its arms produce for the merge (about 4 ms of execution on this table, most of it for observations). A smaller first batch would make ordinary pages cheaper and long dumps cost more statements; 500 is the batch the design was approved with.
 - The estimated cost of the statement grows with the number of rows in the collections, because PostgreSQL plans for the first tenth of the rows (about 2,200 on the evidence data). The pool opens every session with `-c jit=off` (`src/database.ts`), so no table size can start JIT compilation, which would add 100 to 150 ms to every statement. Nothing needs to be configured on the database.
 
@@ -198,4 +310,4 @@ TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/hyperindex_feed
   npm run test:integration:hyperindex
 ```
 
-The command requires `psql`, checks PostgreSQL 16+, the `record` columns, and the two indexes it names (`idx_record_timeline_collection_created` and `idx_record_did_collection`), then runs `npm run test:integration`. It does not apply migrations. The suite's direct SQL fixture loading does not exercise Hyperindex's ingestion path or its `record_created_at` materialization.
+The command requires `psql`, checks PostgreSQL 16+, the `record` columns, and the three indexes it names (`idx_record_timeline_collection_created`, `idx_record_timeline_author_collection_created`, and `idx_record_did_collection`), then runs `npm run test:integration`. It does not apply migrations. The suite's direct SQL fixture loading does not exercise Hyperindex's ingestion path or its `record_created_at` materialization.

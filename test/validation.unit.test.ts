@@ -3,9 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { FeedErrorCode } from '../src/feed/errors.js'
 import {
   ACTIVITY_FEED_PARAMS_TYPE,
+  FOLLOWING_FEED_PARAMS_TYPE,
   type ActivityFeedParams,
+  type FollowingFeedParams,
 } from '../src/feed/types.js'
-import { normalizeActivityRequest } from '../src/feed/validation.js'
+import {
+  normalizeActivityRequest,
+  normalizeFollowingRequest,
+} from '../src/feed/validation.js'
 
 const params = (
   overrides: Partial<ActivityFeedParams> = {},
@@ -65,5 +70,69 @@ describe('normalizeActivityRequest', () => {
     expect(() =>
       normalizeActivityRequest(params({ filter: 'donation' })),
     ).toThrow(/all, project, observation, organization, post, audio/)
+  })
+})
+
+describe('normalizeFollowingRequest', () => {
+  const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
+  const following = (
+    overrides: Partial<FollowingFeedParams> = {},
+  ): FollowingFeedParams => ({
+    $type: FOLLOWING_FEED_PARAMS_TYPE,
+    viewerDid,
+    ...overrides,
+  })
+
+  it('defaults to the feed of every kind for the viewer', () => {
+    expect(normalizeFollowingRequest(following())).toEqual({
+      filter: 'all',
+      viewerDid,
+      limit: 20,
+    })
+  })
+
+  it('takes the filter, limit, and cursor like the activity feed', () => {
+    expect(
+      normalizeFollowingRequest(following({ filter: 'audio' }), {
+        limit: 50,
+        cursor: 'opaque',
+      }),
+    ).toEqual({ filter: 'audio', viewerDid, limit: 50, cursor: 'opaque' })
+  })
+
+  it.each([
+    ['an unknown filter', following({ filter: 'donation' }), {}],
+    ['a limit above the maximum', following(), { limit: 51 }],
+    ['a zero limit', following(), { limit: 0 }],
+  ])('rejects %s as InvalidRequest with HTTP 422', (_name, input, paging) => {
+    expect(
+      thrownBy(() => normalizeFollowingRequest(input, paging)),
+    ).toMatchObject({ code: FeedErrorCode.InvalidRequest, status: 422 })
+  })
+
+  it('asks an anonymous request without a viewer to name one', () => {
+    const error = thrownBy(() =>
+      normalizeFollowingRequest({ $type: FOLLOWING_FEED_PARAMS_TYPE }),
+    )
+
+    expect(error).toMatchObject({
+      code: FeedErrorCode.InvalidRequest,
+      status: 422,
+    })
+    expect(String(error)).toContain(
+      'send a service-auth bearer token or provide params.viewerDid',
+    )
+  })
+
+  it.each([
+    'alice.test',
+    'did:plc:',
+    'did:PLC:abc',
+    `did:plc:${'a'.repeat(2_050)}`,
+    '',
+  ])('rejects the viewer %j that is not a syntactically valid DID', (did) => {
+    expect(
+      thrownBy(() => normalizeFollowingRequest(following({ viewerDid: did }))),
+    ).toMatchObject({ code: FeedErrorCode.InvalidRequest, status: 422 })
   })
 })

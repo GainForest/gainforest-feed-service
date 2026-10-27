@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Builds an ordered GainForest activity feed from current indexed records for the registered feed and parameters selected in the request. The response contains references and selection metadata only: AT-URIs, CIDs, account DIDs, timestamps, and group counts. It does not contain record content. The caller hydrates the referenced records itself. Observations by one account and recordings in one recorder folder are folded into groupItems of at least 3 rows, even when other rows lie between them; smaller groups come back as separate recordItems. A group that continues on a later page comes back as another card with the same groupKey, which clients merge as described on groupItem. Authentication is optional and is verified when supplied, but the activity feed does not depend on the caller: the same request returns the same page whoever sends it. Omitting params selects the global feed.",
+      "description": "Builds an ordered GainForest activity feed from current indexed records for the registered feed and parameters selected in the request. The response contains references and selection metadata only: AT-URIs, CIDs, account DIDs, timestamps, and group counts. It does not contain record content. The caller hydrates the referenced records itself. Observations by one account and recordings in one recorder folder are folded into groupItems of at least 3 rows, even when other rows lie between them; smaller groups come back as separate recordItems. A group that continues on a later page comes back as another card with the same groupKey, which clients merge as described on groupItem. Authentication is optional and is verified when supplied; an invalid token is rejected, never treated as anonymous. The activity feed does not depend on the caller: the same request returns the same page whoever sends it, and omitting params selects the global feed. The following feed returns, in the same form, what the accounts a viewer follows have published; its viewer is the authenticated caller or, for an anonymous request, params.viewerDid.",
       "errors": [
         {
           "name": "InvalidRequest",
@@ -32,14 +32,20 @@
             "feedId": {
               "type": "string",
               "maxLength": 512,
-              "knownValues": ["app.gainforest.feed.defs#activityFeed"],
+              "knownValues": [
+                "app.gainforest.feed.defs#activityFeed",
+                "app.gainforest.feed.defs#followingFeed"
+              ],
               "description": "Identifier of the feed algorithm to execute."
             },
             "params": {
               "type": "union",
               "closed": false,
-              "refs": ["app.gainforest.feed.defs#activityFeedParams"],
-              "description": "Algorithm-specific parameters. Optional for app.gainforest.feed.defs#activityFeed: when omitted, its default applies (filter all)."
+              "refs": [
+                "app.gainforest.feed.defs#activityFeedParams",
+                "app.gainforest.feed.defs#followingFeedParams"
+              ],
+              "description": "Algorithm-specific parameters. Optional for app.gainforest.feed.defs#activityFeed: when omitted, its default applies (filter all). For app.gainforest.feed.defs#followingFeed they are optional only on an authenticated request, which uses the caller as the viewer; an anonymous request must send followingFeedParams with a viewerDid."
             },
             "limit": {
               "type": "integer",
