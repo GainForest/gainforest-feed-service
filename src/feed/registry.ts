@@ -10,6 +10,13 @@ export interface FeedPagination {
 /** One selected page of feed items and the cursor for the next page, if any. */
 export interface FeedPage {
   readonly items: readonly ActivityFeedItem[]
+  /**
+   * The AT-URI of every record the items cover, in item order: a record or
+   * repost item contributes its own URI, a group item every member, newest
+   * first. A group's later members therefore come before the rows that lie
+   * between them in the feed. This is the page `getFeedSkeleton` returns.
+   */
+  readonly uris: readonly string[]
   readonly cursor?: string
 }
 

@@ -3,14 +3,13 @@ import { isAtUriString, isDatetimeString } from '@atproto/syntax'
 import { FeedError, FeedErrorCode } from './errors.js'
 
 /**
- * Version 2 adds the open group to the position. Version 1 cursors are
- * rejected with `InvalidCursor`: they cannot say whether the first item of the
- * next page continues the last item of the previous one.
+ * Version 3 is the last consumed row and nothing else. Versions 1 and 2, which
+ * could not say, or said by naming a group, how a page continues an earlier
+ * card, are rejected with `InvalidCursor`.
  */
-const CURSOR_VERSION = 2
+const CURSOR_VERSION = 3
 const MAX_CURSOR_LENGTH = 4096
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/
-const GROUP_KEY_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -22,28 +21,14 @@ export interface CursorCodec<Cursor, Row> {
 }
 
 /**
- * The burst or audio run that the previous page cut at its size limit. The
- * next page starts a new chunk of it when its first row still belongs to the
- * run, and keeps its `groupKey`.
- *
- * The cursor names the run only by key and kind. The statement reads the
- * run's account and folder from the cursor row in the database, so no record
- * content travels in the cursor and the cursor cannot outgrow its size limit
- * because of what a record stores. A cursor is an unsigned token that the
- * client holds: the service trusts it only to position that client's own page.
+ * Decoded feed position: the last row the previous page consumed. It carries
+ * no record content, so what a record stores cannot grow a cursor, and the
+ * client holds an unsigned token that the service trusts only to position that
+ * client's own page.
  */
-export interface OpenGroup {
-  /** `groupKey` of the run, shared by all of its chunks. */
-  readonly key: string
-  readonly kind: 'observation' | 'audio'
-}
-
-/** Decoded feed position: the last row the previous page consumed. */
 export interface FeedCursor {
   readonly value: string
   readonly uri: string
-  /** Present only when the previous page left a run open. */
-  readonly group?: OpenGroup
 }
 
 const invalidPosition = (message: string): FeedError =>
@@ -51,21 +36,6 @@ const invalidPosition = (message: string): FeedError =>
     FeedErrorCode.InvalidCursor,
     `${message}; use the cursor exactly as returned by the previous page.`,
   )
-
-const decodeOpenGroup = (input: unknown): OpenGroup => {
-  if (!isRecord(input) || Object.keys(input).length !== 2) {
-    throw invalidPosition('cursor group has the wrong shape')
-  }
-
-  const { key, kind } = input
-  if (typeof key !== 'string' || !GROUP_KEY_PATTERN.test(key)) {
-    throw invalidPosition('cursor group key is not a valid group key')
-  }
-  if (kind !== 'observation' && kind !== 'audio') {
-    throw invalidPosition('cursor group kind must be observation or audio')
-  }
-  return { key, kind }
-}
 
 const DATE_PREFIX = /^(\d{4})-(\d{2})-(\d{2})T/
 const UTC_OFFSET_HOURS = /[+-](\d{2}):\d{2}$/
@@ -95,28 +65,20 @@ const isCastableTimestamp = (value: string): boolean => {
   return offset === null || Number(offset[1]) <= MAX_POSTGRES_OFFSET_HOURS
 }
 
-/**
- * Cursor position for feeds ordered by descending timestamp and URI. It also
- * carries the run the previous page left open, when there is one.
- */
+/** Cursor position for feeds ordered by descending timestamp and URI. */
 export const timestampUriCursor: CursorCodec<
   FeedCursor,
   {
     readonly uri: string
     readonly sortValue: string
-    readonly group?: OpenGroup
   }
 > = {
   decode(value) {
-    if (!isRecord(value)) {
+    if (!isRecord(value) || Object.keys(value).length !== 2) {
       throw invalidPosition('cursor position has the wrong shape')
     }
 
     const position = value
-    const hasGroup = Object.hasOwn(position, 'group')
-    if (Object.keys(position).length !== (hasGroup ? 3 : 2)) {
-      throw invalidPosition('cursor position has the wrong shape')
-    }
     if (
       typeof position.value !== 'string' ||
       !isDatetimeString(position.value)
@@ -135,17 +97,9 @@ export const timestampUriCursor: CursorCodec<
       throw invalidPosition('cursor uri must be a valid AT-URI')
     }
 
-    return {
-      value: position.value,
-      uri: position.uri,
-      ...(hasGroup ? { group: decodeOpenGroup(position.group) } : {}),
-    }
+    return { value: position.value, uri: position.uri }
   },
-  encode: (row) => ({
-    value: row.sortValue,
-    uri: row.uri,
-    ...(row.group === undefined ? {} : { group: row.group }),
-  }),
+  encode: (row) => ({ value: row.sortValue, uri: row.uri }),
 }
 
 /** Encodes one feed-scoped position as unpadded base64url JSON. */

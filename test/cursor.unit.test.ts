@@ -11,9 +11,6 @@ const feedId = 'app.gainforest.feed.defs#activityFeed'
 const otherFeedId = 'app.gainforest.feed.defs#otherFeed'
 const uri =
   'at://did:plc:ar7c4by46qjdydhdevvrndac/org.hypercerts.claim.activity/3kpn'
-const did = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
-const folder = `at://${did}/app.gainforest.ac.deployment/f`
-const key = 'AAAAAAAAAAAAAAAAAAAAAA'
 const row = {
   uri,
   sortValue: '2026-07-21T10:00:00.123456Z',
@@ -22,7 +19,7 @@ const row = {
 const encodePayload = (payload: unknown): string =>
   Buffer.from(JSON.stringify(payload)).toString('base64url')
 
-const withValue = (value: unknown, version = 2): string =>
+const withValue = (value: unknown, version = 3): string =>
   encodePayload({ version, feedId, value })
 
 const position = { value: '2026-07-21T10:00:00.000000Z', uri }
@@ -42,7 +39,7 @@ describe('feed cursor', () => {
     expect(
       JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')),
     ).toEqual({
-      version: 2,
+      version: 3,
       feedId,
       value: {
         value: '2026-07-21T10:00:00.123456Z',
@@ -52,26 +49,6 @@ describe('feed cursor', () => {
     expect(decodeCursor(feedId, encoded, timestampUriCursor)).toEqual({
       value: '2026-07-21T10:00:00.123456Z',
       uri,
-    })
-  })
-
-  it.each([
-    ['an audio run', { key, kind: 'audio' }],
-    ['a burst', { key, kind: 'observation' }],
-  ] as const)('round-trips the open group of %s', (_name, group) => {
-    const encoded = encodeCursor(feedId, { ...row, group }, timestampUriCursor)
-
-    expect(
-      JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')),
-    ).toEqual({
-      version: 2,
-      feedId,
-      value: { value: row.sortValue, uri, group },
-    })
-    expect(decodeCursor(feedId, encoded, timestampUriCursor)).toEqual({
-      value: row.sortValue,
-      uri,
-      group,
     })
   })
 
@@ -87,14 +64,20 @@ describe('feed cursor', () => {
     )
   })
 
-  it('rejects a version 1 cursor, which cannot say whether a run continues', () => {
-    const encoded = withValue(position, 1)
+  // Version 1 could not say whether a page continues a run, and version 2
+  // named the run a page cut in the cursor. Version 3 holds the last consumed
+  // row only, so a client that still holds either starts again.
+  it.each([1, 2])(
+    'rejects a version %i cursor and says to request the first page again',
+    (version) => {
+      const encoded = withValue(position, version)
 
-    expectInvalidCursor(encoded)
-    expect(() => decodeCursor(feedId, encoded, timestampUriCursor)).toThrow(
-      'version must be 2',
-    )
-  })
+      expectInvalidCursor(encoded)
+      expect(() => decodeCursor(feedId, encoded, timestampUriCursor)).toThrow(
+        'version must be 3; discard this unsupported cursor and request the first page again',
+      )
+    },
+  )
 
   it('rejects cursor payloads with unsupported fields', () => {
     const encoded = withValue({ sortBy: 'feedTimestamp', ...position })
@@ -105,29 +88,22 @@ describe('feed cursor', () => {
   it.each([
     'not base64url!',
     Buffer.from('not-json').toString('base64url'),
-    withValue(position, 3),
+    withValue(position, 4),
     encodePayload({ version: 2, feedId, value: 'not-a-position' }),
   ])('rejects malformed or unsupported cursor %s', (cursor) => {
     expectInvalidCursor(cursor)
   })
 
+  // The cursor holds a position and nothing a record controls. A group, even
+  // an empty one, is not a cursor the service issued.
   it.each([
-    ['a group that is not an object', 'audio'],
-    ['a group without a key', { kind: 'audio' }],
-    ['a group without a kind', { key, extra: true }],
     [
-      'a group key with characters outside base64url',
-      { key: 'a b', kind: 'audio' },
+      'a group of the version 2 shape',
+      { key: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'audio' },
     ],
-    ['an empty group key', { key: '', kind: 'audio' }],
-    ['a group key that is too long', { key: 'A'.repeat(65), kind: 'audio' }],
-    ['a group of an unknown kind', { key, kind: 'post' }],
-    // The statement reads the account and the folder from the database, so a
-    // cursor that names them is not one the service issued.
-    ['a group that names its account', { key, kind: 'audio', did }],
-    ['a group that names its folder', { key, kind: 'audio', did, folder }],
-    ['a group with an unsupported field', { key, kind: 'audio', extra: true }],
-  ])('rejects %s', (_name, group) => {
+    ['an empty group', {}],
+    ['a null group', null],
+  ])('rejects a position that carries %s', (_name, group) => {
     const encoded = withValue({ ...position, group })
 
     expectInvalidCursor(encoded)
@@ -169,9 +145,8 @@ describe('feed cursor', () => {
     })
   })
 
-  it('rejects an unsupported field next to a position that has no group', () => {
-    const encoded = withValue({ ...position, groupKey: key })
-
-    expectInvalidCursor(encoded)
+  it('rejects a position with a missing field', () => {
+    expectInvalidCursor(withValue({ value: position.value }))
+    expectInvalidCursor(withValue({ uri }))
   })
 })

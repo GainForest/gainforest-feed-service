@@ -5,14 +5,12 @@ import { FeedService } from '../src/feed/service.js'
 import {
   ACTIVITY_FEED_ID,
   ACTIVITY_FEED_PARAMS_TYPE,
-  AUDIO_ITEM_TYPE,
-  BURST_ITEM_TYPE,
+  GROUP_ITEM_TYPE,
   RECORD_ITEM_TYPE,
   REPOST_ITEM_TYPE,
   type FeedRequest,
 } from '../src/feed/types.js'
 
-const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const authorDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
 const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
 const at = (collection: string, rkey: string): string =>
@@ -20,7 +18,7 @@ const at = (collection: string, rkey: string): string =>
 
 const input: FeedRequest = {
   feedId: ACTIVITY_FEED_ID,
-  params: { $type: ACTIVITY_FEED_PARAMS_TYPE, viewerDid },
+  params: { $type: ACTIVITY_FEED_PARAMS_TYPE },
 }
 
 const page: FeedPage = {
@@ -42,7 +40,8 @@ const page: FeedPage = {
       subject: at('app.gainforest.feed.post', 'subject'),
     },
     {
-      $type: BURST_ITEM_TYPE,
+      $type: GROUP_ITEM_TYPE,
+      kind: 'observation',
       did: authorDid,
       total: 200,
       from: '2026-07-21T09:00:00.000Z',
@@ -52,11 +51,11 @@ const page: FeedPage = {
         at('app.gainforest.dwc.occurrence', 'o2'),
       ],
       groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
-      continued: false,
-      capped: true,
+      more: true,
     },
     {
-      $type: AUDIO_ITEM_TYPE,
+      $type: GROUP_ITEM_TYPE,
+      kind: 'audio',
       did: authorDid,
       total: 40,
       from: '2026-07-20T22:00:00.000Z',
@@ -66,9 +65,18 @@ const page: FeedPage = {
         at('app.gainforest.ac.audio', 'a1'),
       ],
       groupKey: 'BBBBBBBBBBBBBBBBBBBBBB',
-      continued: false,
-      capped: false,
     },
+  ],
+  // A group lists only a sample in its item and every row it covers here.
+  uris: [
+    at('org.hypercerts.collection', 'p1'),
+    at('app.gainforest.feed.repost', 'r1'),
+    at('app.gainforest.dwc.occurrence', 'o3'),
+    at('app.gainforest.dwc.occurrence', 'o2'),
+    at('app.gainforest.dwc.occurrence', 'o1'),
+    at('app.gainforest.ac.audio', 'a2'),
+    at('app.gainforest.ac.audio', 'a1'),
+    at('app.gainforest.ac.audio', 'a0'),
   ],
   cursor: 'opaque-cursor',
 }
@@ -95,7 +103,7 @@ describe('FeedService', () => {
     expect(pages.calls).toEqual([input])
   })
 
-  it('flattens the same page into skeleton subjects in feed order', async () => {
+  it('returns every URI the page covers as skeleton subjects in feed order, not only the samples', async () => {
     const pages = new FakePageLoader(page)
 
     await expect(
@@ -106,15 +114,20 @@ describe('FeedService', () => {
         { subject: at('app.gainforest.feed.repost', 'r1') },
         { subject: at('app.gainforest.dwc.occurrence', 'o3') },
         { subject: at('app.gainforest.dwc.occurrence', 'o2') },
+        { subject: at('app.gainforest.dwc.occurrence', 'o1') },
         { subject: at('app.gainforest.ac.audio', 'a2') },
         { subject: at('app.gainforest.ac.audio', 'a1') },
+        { subject: at('app.gainforest.ac.audio', 'a0') },
       ],
       cursor: 'opaque-cursor',
     })
   })
 
   it('omits the cursor when the selected page has none', async () => {
-    const lastPage: FeedPage = { items: page.items.slice(0, 1) }
+    const lastPage: FeedPage = {
+      items: page.items.slice(0, 1),
+      uris: page.uris.slice(0, 1),
+    }
     const service = new FeedService(new FakePageLoader(lastPage))
 
     const feed = await service.getFeed(input)

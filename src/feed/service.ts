@@ -1,4 +1,3 @@
-import { skeletonSubjects } from './items.js'
 import type { FeedPageLoader } from './registry.js'
 import type {
   FeedRequest,
@@ -31,9 +30,7 @@ export class FeedService implements FeedReader, FeedSkeletonReader {
   async getFeedSkeleton(input: FeedRequest): Promise<GetFeedSkeletonOutput> {
     const page = await this.pages.loadPage(input)
     return {
-      feed: page.items
-        .flatMap(skeletonSubjects)
-        .map((subject) => ({ subject })),
+      feed: page.uris.map((subject) => ({ subject })),
       ...(page.cursor === undefined ? {} : { cursor: page.cursor }),
     }
   }

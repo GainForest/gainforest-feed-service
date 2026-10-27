@@ -9,7 +9,12 @@ import {
   encodeCursor,
   timestampUriCursor,
 } from '../src/feed/cursor.js'
-import { createActivityFeed } from '../src/feed/query.js'
+import {
+  BATCH_ROWS,
+  REQUEST_ROWS,
+  createActivityFeed,
+  type ActivityFeedOptions,
+} from '../src/feed/query.js'
 import { FeedRegistry } from '../src/feed/registry.js'
 import { FeedService } from '../src/feed/service.js'
 import {
@@ -18,11 +23,16 @@ import {
   type ActivityFeedItem,
   type FeedRequest,
   type GetFeedOutput,
+  type GroupItem,
 } from '../src/feed/types.js'
 import { $output } from '../src/lexicons/app/gainforest/feed/getFeed.js'
 import { $output as $skeletonOutput } from '../src/lexicons/app/gainforest/feed/getFeedSkeleton.js'
 import { Metrics } from '../src/metrics.js'
-import { modelFeed, type ModelItem } from './support/feed-model.js'
+import {
+  modelPages,
+  modelRowUris,
+  type ModelItem,
+} from './support/feed-model.js'
 import {
   RecordFixture,
   cid,
@@ -125,16 +135,56 @@ const follow = (viewer: string, subject: string): SeedRecord => ({
 const rkeyOf = (uri: string): string => uri.slice(uri.lastIndexOf('/') + 1)
 
 /**
- * A compact, comparable form of service items. Group keys become run numbers
- * in order of appearance, so items of one run compare equal to the model's.
+ * One recorder's dump: `count` recordings `gapSeconds` apart, the newest
+ * `endSeconds` after the fixture epoch, all in one folder of their owner.
+ */
+const dumpOf = (
+  name: string,
+  count: number,
+  gapSeconds: number,
+  endSeconds: number,
+): { owner: string; folder: string; records: SeedRecord[] } => {
+  const owner = randomDid()
+  const folder = `at://${owner}/app.gainforest.ac.deployment/${name}`
+  return {
+    owner,
+    folder,
+    records: Array.from({ length: count }, (_, index) =>
+      audio(
+        owner,
+        `${name}${String(index).padStart(5, '0')}`,
+        second(endSeconds - (count - 1 - index) * gapSeconds),
+        folder,
+      ),
+    ),
+  }
+}
+
+/** The model's form of a recording that is shown as a record. */
+const audioRecordOf = (
+  did: string,
+  rkey: string,
+  createdAt: string,
+): ModelItem => ({
+  type: 'record',
+  kind: 'audio',
+  uri: `at://${did}/${AUDIO}/${rkey}`,
+  did,
+  at: Date.parse(createdAt),
+})
+
+/**
+ * A compact, comparable form of service items. Group keys become group indexes
+ * in order of appearance on the page, so items of one group compare equal to
+ * the model's.
  */
 const modelOf = (items: readonly ActivityFeedItem[]): ModelItem[] => {
-  const runs = new Map<string, number>()
-  const runOf = (groupKey: string): number => {
-    const known = runs.get(groupKey)
+  const groupIndexes = new Map<string, number>()
+  const groupIndexOf = (groupKey: string): number => {
+    const known = groupIndexes.get(groupKey)
     if (known !== undefined) return known
-    runs.set(groupKey, runs.size)
-    return runs.size - 1
+    groupIndexes.set(groupKey, groupIndexes.size)
+    return groupIndexes.size - 1
   }
   return items.map((item): ModelItem => {
     switch (item.$type) {
@@ -154,71 +204,79 @@ const modelOf = (items: readonly ActivityFeedItem[]): ModelItem[] => {
           subject: item.subject,
           at: Date.parse(item.createdAt),
         }
-      case 'app.gainforest.feed.defs#burstItem':
+      case 'app.gainforest.feed.defs#groupItem':
         return {
-          type: 'burst',
-          did: item.did,
-          total: item.total,
-          from: Date.parse(item.from),
-          to: Date.parse(item.to),
-          subjects: item.subjects,
-          run: runOf(item.groupKey),
-          continued: item.continued,
-          capped: item.capped,
-        }
-      case 'app.gainforest.feed.defs#audioItem':
-        return {
-          type: 'audio',
+          type: 'group',
+          kind: item.kind,
           did: item.did,
           deployment: item.deployment ?? null,
           total: item.total,
           from: Date.parse(item.from),
           to: Date.parse(item.to),
           subjects: item.subjects,
-          run: runOf(item.groupKey),
-          continued: item.continued,
-          capped: item.capped,
+          groupIndex: groupIndexOf(item.groupKey),
+          more: item.more ?? false,
         }
     }
   })
 }
 
-/** Short labels for readable assertions: `observation:o1`, `burst(3):o3,o2,o1`, … */
+/** Short labels for readable assertions: `observation:o1`, `observation(3):o3,o2,o1`, … */
 const label = (item: ActivityFeedItem): string => {
   switch (item.$type) {
     case 'app.gainforest.feed.defs#recordItem':
       return `${item.kind}:${rkeyOf(item.uri)}`
     case 'app.gainforest.feed.defs#repostItem':
       return `repost:${rkeyOf(item.uri)}`
-    case 'app.gainforest.feed.defs#burstItem':
-      return `burst(${String(item.total)}):${item.subjects.map(rkeyOf).join(',')}`
-    case 'app.gainforest.feed.defs#audioItem':
-      return `audio(${String(item.total)}):${item.subjects.map(rkeyOf).join(',')}`
+    case 'app.gainforest.feed.defs#groupItem':
+      return `${item.kind}(${String(item.total)}):${item.subjects.map(rkeyOf).join(',')}`
   }
 }
 
-/** The group fields of the burst and audio items, in feed order. */
-const chunksOf = (items: readonly ActivityFeedItem[]) =>
+/** The group items of a page, in feed order. */
+const groupsOf = (items: readonly ActivityFeedItem[]): GroupItem[] =>
   items.flatMap((item) =>
-    'groupKey' in item
-      ? [
-          {
-            type: item.$type.slice(item.$type.indexOf('#') + 1),
-            total: item.total,
-            continued: item.continued,
-            capped: item.capped,
-            groupKey: item.groupKey,
-          },
-        ]
-      : [],
+    item.$type === 'app.gainforest.feed.defs#groupItem' ? [item] : [],
   )
 
-const isObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null
-
-/** The shape of every chunk, without the group key that tells the runs apart. */
-const flagsOf = (items: readonly ActivityFeedItem[]) =>
-  chunksOf(items).map(({ groupKey: _groupKey, ...flags }) => flags)
+/**
+ * The merge a client applies to cards of later pages, as the Lexicon and the
+ * README document it: keep the last card shown for each groupKey, and merge a
+ * later card with the same groupKey into it when its `to` is no more than 12
+ * hours before that card's `from`. Returns the merged cards in feed order.
+ */
+const mergeGroups = (
+  pages: readonly GetFeedOutput[],
+): { groupKey: string; total: number; from: string; more: boolean }[] => {
+  const cards: {
+    groupKey: string
+    total: number
+    from: string
+    more: boolean
+  }[] = []
+  const last = new Map<string, (typeof cards)[number]>()
+  for (const group of groupsOf(pages.flatMap((page) => page.feed))) {
+    const shown = last.get(group.groupKey)
+    if (
+      shown !== undefined &&
+      Date.parse(shown.from) - Date.parse(group.to) <= 12 * 3_600_000
+    ) {
+      shown.total += group.total
+      shown.from = group.from
+      shown.more = group.more ?? false
+    } else {
+      const card = {
+        groupKey: group.groupKey,
+        total: group.total,
+        from: group.from,
+        more: group.more ?? false,
+      }
+      cards.push(card)
+      last.set(group.groupKey, card)
+    }
+  }
+  return cards
+}
 
 const labels = (output: GetFeedOutput): string[] => output.feed.map(label)
 
@@ -255,19 +313,16 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
     return { status: response.status, body: (await response.json()) as unknown }
   }
 
-  /** A feed service over the fixture, optionally with a small group cap. */
-  const serviceFor = (maxGroupRows?: number): FeedService =>
+  /** A feed service over the fixture, optionally with small batch and budget sizes. */
+  const serviceFor = (options: ActivityFeedOptions = {}): FeedService =>
     new FeedService(
       new FeedRegistry([
-        createActivityFeed(
-          { database: fixture.database, metrics },
-          maxGroupRows === undefined ? {} : { maxGroupRows },
-        ),
+        createActivityFeed({ database: fixture.database, metrics }, options),
       ]),
     )
 
   /** A feed service that records the statements it sends to the database. */
-  const countingService = (maxGroupRows?: number) => {
+  const countingService = (options: ActivityFeedOptions = {}) => {
     let sent: { text: string; values: readonly unknown[] }[] = []
     const counted = new FeedService(
       new FeedRegistry([
@@ -281,57 +336,17 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
             },
             metrics,
           },
-          maxGroupRows === undefined ? {} : { maxGroupRows },
+          options,
         ),
       ]),
     )
     return {
       service: counted,
       statements: () => sent.length,
-      lastStatement: () => sent.at(-1),
       reset: () => {
         sent = []
       },
     }
-  }
-
-  /**
-   * Runs a statement the service sent under EXPLAIN ANALYZE and returns the
-   * scans of `record` the plan contains, with the number of times each one ran.
-   * The follows lookup (alias `follow`) is left out: it is not a feed arm.
-   */
-  const feedScansOf = async (statement: {
-    text: string
-    values: readonly unknown[]
-  }): Promise<{ alias: string; loops: number }[]> => {
-    const { rows } = await fixture.database.query(
-      `EXPLAIN (ANALYZE, FORMAT JSON) ${statement.text}`,
-      statement.values,
-    )
-    const scans: { alias: string; loops: number }[] = []
-    const visit = (node: unknown): void => {
-      if (!isObject(node)) return
-      const { Alias: alias, Plans: children } = node
-      const loops = node['Actual Loops']
-      if (
-        node['Relation Name'] === 'record' &&
-        typeof alias === 'string' &&
-        typeof loops === 'number' &&
-        alias !== 'follow'
-      ) {
-        scans.push({ alias, loops })
-      }
-      if (Array.isArray(children)) children.forEach(visit)
-    }
-    // Each row is `{ "QUERY PLAN": [{ "Plan": { ... } }] }`.
-    for (const row of rows as readonly unknown[]) {
-      const plans = isObject(row) ? row['QUERY PLAN'] : undefined
-      if (!Array.isArray(plans)) continue
-      for (const entry of plans) {
-        if (isObject(entry)) visit(entry.Plan)
-      }
-    }
-    return scans
   }
 
   beforeEach(async () => {
@@ -347,8 +362,6 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
   const request = (
     options: {
       readonly filter?: string
-      readonly following?: boolean
-      readonly viewerDid?: string
       readonly limit?: number
       readonly cursor?: string
     } = {},
@@ -357,12 +370,6 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
     params: {
       $type: ACTIVITY_FEED_PARAMS_TYPE,
       ...(options.filter === undefined ? {} : { filter: options.filter }),
-      ...(options.following === undefined
-        ? {}
-        : { following: options.following }),
-      ...(options.viewerDid === undefined
-        ? {}
-        : { viewerDid: options.viewerDid }),
     },
     ...(options.limit === undefined ? {} : { limit: options.limit }),
     ...(options.cursor === undefined ? {} : { cursor: options.cursor }),
@@ -397,6 +404,32 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
     reader: FeedService = service,
   ): Promise<ActivityFeedItem[]> =>
     (await walk(options, limit, reader)).flatMap((page) => page.feed)
+
+  /** Pages through the whole feed and counts the statements each request sent. */
+  const walkCounted = async (
+    counted: ReturnType<typeof countingService>,
+    options: Parameters<typeof request>[0] = {},
+    limit = 50,
+  ): Promise<{ pages: GetFeedOutput[]; statements: number[] }> => {
+    const pages: GetFeedOutput[] = []
+    const statements: number[] = []
+    let cursor: string | undefined
+    do {
+      counted.reset()
+      const page = await counted.service.getFeed(
+        request({
+          ...options,
+          limit,
+          ...(cursor === undefined ? {} : { cursor }),
+        }),
+      )
+      pages.push(page)
+      statements.push(counted.statements())
+      cursor = page.cursor
+      expect(pages.length).toBeLessThan(500)
+    } while (cursor !== undefined)
+    return { pages, statements }
+  }
 
   describe('selection', () => {
     it('selects the four record kinds newest first and serves valid wire items', async () => {
@@ -447,7 +480,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       )
     })
 
-    it('limits the audio filter to audio groups', async () => {
+    it('limits the audio filter to recordings', async () => {
       const did = randomDid()
       await fixture.seed([
         observation(did, 'o1', minute(40)),
@@ -456,7 +489,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
       expect(
         labels(await service.getFeed(request({ filter: 'audio' }))),
-      ).toEqual(['audio(1):a1'])
+      ).toEqual(['audio:a1'])
     })
 
     it('excludes replies and community-event posts but keeps tagged and null-reply posts', async () => {
@@ -569,7 +602,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       ])
 
       expect(labels(await service.getFeed(request()))).toEqual([
-        'audio(1):good-audio',
+        'audio:good-audio',
         'post:valid',
       ])
     })
@@ -586,11 +619,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
       const omitted = await service.getFeed({ feedId: ACTIVITY_FEED_ID })
 
-      expect(labels(omitted)).toEqual([
-        'audio(1):a1',
-        'post:p1',
-        'observation:o1',
-      ])
+      expect(labels(omitted)).toEqual(['audio:a1', 'post:p1', 'observation:o1'])
       expect(omitted).toEqual(await service.getFeed(request()))
       await expect(
         service.getFeedSkeleton({ feedId: ACTIVITY_FEED_ID }),
@@ -640,7 +669,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       const output = await service.getFeed(request())
 
       expect(labels(output)).toEqual([
-        'audio(1):a1',
+        'audio:a1',
         'post:p1',
         'observation:o1',
         'project:c1',
@@ -681,8 +710,17 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       const did = randomDid()
       const folder = `at://${did}/app.gainforest.ac.deployment/f`
       const now = Date.now()
+      const recent = (rkey: string, minutesAgo: number): SeedRecord =>
+        audio(
+          did,
+          rkey,
+          new Date(now - minutesAgo * 60_000).toISOString(),
+          folder,
+        )
       await fixture.seed([
-        audio(did, 'recent', new Date(now - 3_600_000).toISOString(), folder),
+        recent('recent1', 30),
+        recent('recent2', 20),
+        recent('recent3', 10),
         audio(did, 'ahead', new Date(now + 3_600_000).toISOString(), folder),
         audio(did, 'far-future', '2099-06-01T00:00:00.000Z', folder),
         audio(did, 'year-10000', '10000-01-01T04:59:59Z', folder),
@@ -692,8 +730,10 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
       expect(items).toHaveLength(1)
       expect(items[0]).toMatchObject({
-        total: 1,
-        subjects: [`at://${did}/${AUDIO}/recent`],
+        total: 3,
+        subjects: ['recent3', 'recent2', 'recent1'].map(
+          (rkey) => `at://${did}/${AUDIO}/${rkey}`,
+        ),
       })
     })
 
@@ -833,154 +873,64 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
     })
   })
 
-  describe('following', () => {
-    it('limits every kind to followed authors and reposts to the reposter', async () => {
+  describe('params the feed does not define', () => {
+    // If following were honoured, a viewer who follows one account would see
+    // only that account's records. Every caller gets the same feed instead.
+    it('ignores following and viewerDid: the same feed on both procedures for every caller', async () => {
       const viewer = randomDid()
       const followed = randomDid()
       const stranger = randomDid()
-      const original = post(stranger, 'subject', minute(1))
       await fixture.seed([
         follow(viewer, followed),
-        project(followed, 'c1', minute(10)),
-        post(followed, 'p1', minute(20)),
-        observation(followed, 'o1', minute(30)),
-        organization(followed, minute(40)),
-        audio(followed, 'a1', minute(50)),
-        repost(followed, 'r-by-followed', minute(60), original),
-        repost(
-          stranger,
-          'r-by-stranger',
-          minute(61),
-          project(followed, 'c1', minute(10)),
-        ),
-        post(stranger, 'p-stranger', minute(70)),
-        // Every kind is scoped, so none of a stranger's records may appear.
-        project(stranger, 'c-stranger', minute(71)),
-        organization(stranger, minute(72)),
-        observation(stranger, 'o-stranger', minute(73)),
-        audio(stranger, 'a-stranger', minute(74)),
-        original,
+        post(followed, 'p1', minute(1)),
+        post(stranger, 'p2', minute(2)),
+        observation(stranger, 'o1', minute(3)),
+        audio(stranger, 'a1', minute(4)),
       ])
 
-      const output = await service.getFeed(
-        request({ following: true, viewerDid: viewer }),
-      )
-
-      expect(labels(output)).toEqual([
-        'repost:r-by-followed',
-        'audio(1):a1',
-        'organization:self',
-        'observation:o1',
-        'post:p1',
-        'project:c1',
-      ])
-    })
-
-    describe('a viewer who follows nobody', () => {
-      /** One record of every kind by strangers, and a follow by someone else. */
-      const seedStrangers = async (): Promise<void> => {
-        const stranger = randomDid()
-        await fixture.seed([
-          post(stranger, 'p1', minute(1)),
-          project(stranger, 'c1', minute(2)),
-          organization(stranger, minute(3)),
-          observation(stranger, 'o1', minute(4)),
-          audio(stranger, 'a1', minute(5)),
-          repost(
-            stranger,
-            'r1',
-            minute(6),
-            post(randomDid(), 'other', minute(0)),
-          ),
-          follow(randomDid(), stranger),
-        ])
+      /** The request body as a client sends it, with whatever else it adds to the params. */
+      const send = async (
+        procedure: 'getFeed' | 'getFeedSkeleton',
+        extra: Record<string, unknown>,
+      ): Promise<{ status: number; body: unknown }> => {
+        const response = await appFor(service).fetch(
+          postJson(`app.gainforest.feed.${procedure}`, {
+            feedId: ACTIVITY_FEED_ID,
+            params: { $type: ACTIVITY_FEED_PARAMS_TYPE, ...extra },
+          }),
+        )
+        return {
+          status: response.status,
+          body: (await response.json()) as unknown,
+        }
       }
 
-      it('gets an empty page in one statement, whatever the other accounts store', async () => {
-        const viewer = randomDid()
-        await seedStrangers()
-        const counted = countingService()
+      for (const procedure of ['getFeed', 'getFeedSkeleton'] as const) {
+        const global = await send(procedure, {})
+        expect(global.status).toBe(200)
 
-        await expect(
-          counted.service.getFeed(
-            request({ following: true, viewerDid: viewer }),
-          ),
-        ).resolves.toEqual({ feed: [] })
-        expect(counted.statements()).toBe(1)
-      })
-
-      // Without the guard in every arm each arm walks its whole collection
-      // for a filter that nothing passes: 1.4 s on a table ten times the size
-      // of staging, against 1 ms with it. The page is empty either way, so
-      // only the plan shows it.
-      it('reads no feed collection', async () => {
-        const viewer = randomDid()
-        await seedStrangers()
-        const counted = countingService()
-        await counted.service.getFeed(
-          request({ following: true, viewerDid: viewer }),
-        )
-
-        const statement = counted.lastStatement()
-        expect(statement).toBeDefined()
-        const scans = await feedScansOf(statement ?? { text: '', values: [] })
-
-        // The six arms are in the plan, and none of them ran.
-        expect(scans.length).toBeGreaterThanOrEqual(6)
-        expect(scans.filter(({ loops }) => loops > 0)).toEqual([])
-      })
-    })
-
-    it('ignores follows Hyperindex has not validated and follows without a DID subject', async () => {
-      const viewer = randomDid()
-      const author = randomDid()
-      await fixture.seed([
-        { ...follow(viewer, author), validation: 'invalid' },
-        {
-          did: viewer,
-          collection: FOLLOW,
-          rkey: 'odd',
-          createdAt: minute(0),
-          json: { subject: 42 },
-        },
-        post(author, 'p1', minute(1)),
+        for (const extra of [
+          { following: true, viewerDid: viewer },
+          { following: true },
+          { following: 'yes', viewerDid: 'alice.test' },
+        ]) {
+          expect(
+            await send(procedure, extra),
+            `${procedure} with ${JSON.stringify(extra)}`,
+          ).toEqual(global)
+        }
+      }
+      expect(labels(await service.getFeed(request()))).toEqual([
+        'audio:a1',
+        'observation:o1',
+        'post:p2',
+        'post:p1',
       ])
-
-      await expect(
-        service.getFeed(request({ following: true, viewerDid: viewer })),
-      ).resolves.toEqual({ feed: [] })
-    })
-
-    it("does not follow other viewers' follows", async () => {
-      const viewer = randomDid()
-      const otherViewer = randomDid()
-      const author = randomDid()
-      await fixture.seed([
-        follow(otherViewer, author),
-        post(author, 'p1', minute(1)),
-      ])
-
-      await expect(
-        service.getFeed(request({ following: true, viewerDid: viewer })),
-      ).resolves.toEqual({ feed: [] })
-    })
-
-    it('serves the global feed when following is false even with a viewer', async () => {
-      const viewer = randomDid()
-      await fixture.seed([post(randomDid(), 'p1', minute(1))])
-
-      expect(
-        labels(
-          await service.getFeed(
-            request({ following: false, viewerDid: viewer }),
-          ),
-        ),
-      ).toEqual(['post:p1'])
     })
   })
 
-  describe('bursts', () => {
-    it('collapses two or more adjacent observations into one burst with exact counts', async () => {
+  describe('observation groups', () => {
+    it('folds three observations of one account into one group with exact counts', async () => {
       const did = randomDid()
       await fixture.seed([
         observation(did, 'o1', minute(1)),
@@ -992,7 +942,8 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
       expect(output.feed).toEqual([
         {
-          $type: 'app.gainforest.feed.defs#burstItem',
+          $type: 'app.gainforest.feed.defs#groupItem',
+          kind: 'observation',
           did,
           total: 3,
           from: expect.stringMatching(/^2026-03-01T00:01:00/) as unknown,
@@ -1003,19 +954,24 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
             `at://${did}/${OBSERVATION}/o1`,
           ],
           groupKey: expect.stringMatching(/^[A-Za-z0-9_-]{22}$/) as unknown,
-          continued: false,
-          capped: false,
         },
       ])
       expect(() => $output.schema.$parse(output)).not.toThrow()
     })
 
-    it('keeps a single observation as a record item', async () => {
+    it('shows one or two observations of an account as separate records', async () => {
       const did = randomDid()
-      await fixture.seed([observation(did, 'only', minute(1))])
+      const other = randomDid()
+      await fixture.seed([
+        observation(did, 'o1', minute(1)),
+        observation(other, 'x1', minute(2)),
+        observation(did, 'o2', minute(3)),
+      ])
 
       expect(labels(await service.getFeed(request()))).toEqual([
-        'observation:only',
+        'observation:o2',
+        'observation:x1',
+        'observation:o1',
       ])
     })
 
@@ -1030,11 +986,11 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
       expect(labels(await service.getFeed(request()))).toEqual([
         'observation:d',
-        'burst(3):c,b,a',
+        'observation(3):c,b,a',
       ])
     })
 
-    it('is broken by an interleaved row of another kind or another account', async () => {
+    it('is not broken by interleaved rows of another kind or another account', async () => {
       const did = randomDid()
       const other = randomDid()
       await fixture.seed([
@@ -1049,30 +1005,27 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       ])
 
       expect(labels(await service.getFeed(request()))).toEqual([
-        'burst(2):c2,c1',
+        'observation(6):c2,c1,b2,b1,a2,a1',
         'observation:between-b',
-        'burst(2):b2,b1',
         'post:between-a',
-        'burst(2):a2,a1',
       ])
     })
 
-    it('is not broken by an interleaved row the active filter excludes', async () => {
+    it('groups the same observations whether or not the filter keeps the rows between them', async () => {
       const did = randomDid()
-      const other = randomDid()
       await fixture.seed([
         observation(did, 'a1', minute(1)),
-        post(other, 'between', minute(2)),
+        post(randomDid(), 'between', minute(2)),
         observation(did, 'a2', minute(3)),
+        observation(did, 'a3', minute(4)),
       ])
 
       expect(
         labels(await service.getFeed(request({ filter: 'observation' }))),
-      ).toEqual(['burst(2):a2,a1'])
+      ).toEqual(['observation(3):a3,a2,a1'])
       expect(labels(await service.getFeed(request()))).toEqual([
-        'observation:a2',
+        'observation(3):a3,a2,a1',
         'post:between',
-        'observation:a1',
       ])
     })
 
@@ -1087,7 +1040,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       const [item] = (await service.getFeed(request())).feed
 
       expect(item).toMatchObject({
-        $type: 'app.gainforest.feed.defs#burstItem',
+        $type: 'app.gainforest.feed.defs#groupItem',
         total: 45,
       })
       const subjects = item && 'subjects' in item ? item.subjects : []
@@ -1099,7 +1052,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       )
     })
 
-    it('keeps sightings with a valid bioacoustic sidecar out of bursts', async () => {
+    it('keeps sightings with a valid bioacoustic sidecar out of groups', async () => {
       const did = randomDid()
       const sidecar = (source: string) =>
         JSON.stringify({
@@ -1134,15 +1087,82 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       ])
 
       expect(labels(await service.getFeed(request()))).toEqual([
-        'burst(4):photo6,photo5,photo4,photo3',
+        'observation(6):photo6,photo5,photo4,photo3,photo2,photo1',
         'observation:sound1',
-        'burst(2):photo2,photo1',
+      ])
+    })
+
+    it('shows bioacoustic sightings one by one however many an account has', async () => {
+      const did = randomDid()
+      const source = `at://${did}/${AUDIO}/src`
+      const sound = (rkey: string, at: string): SeedRecord =>
+        observation(did, rkey, at, {
+          dynamicProperties: JSON.stringify({
+            gainforestBioacoustics: {
+              version: 1,
+              sourceAudioUri: source,
+              labelCategory: 'frog',
+              startTimeSeconds: 1,
+              endTimeSeconds: 2,
+              minFrequencyHz: 100,
+              maxFrequencyHz: 9000,
+            },
+          }),
+          associatedMedia: source,
+        })
+      await fixture.seed([
+        sound('s1', minute(1)),
+        sound('s2', minute(2)),
+        sound('s3', minute(3)),
+        sound('s4', minute(4)),
+      ])
+
+      expect(labels(await service.getFeed(request()))).toEqual([
+        'observation:s4',
+        'observation:s3',
+        'observation:s2',
+        'observation:s1',
       ])
     })
   })
 
-  describe('audio', () => {
-    it('groups adjacent recordings by owner and recorder folder', async () => {
+  describe('rows that never group', () => {
+    it('shows reposts, posts, projects, and organizations one by one, whoever stores them', async () => {
+      const author = randomDid()
+      const reposter = randomDid()
+      const originals = Array.from({ length: 4 }, (_, index) =>
+        post(author, `p${String(index)}`, minute(index + 1)),
+      )
+      await fixture.seed([
+        ...originals,
+        ...originals.map((original, index) =>
+          repost(reposter, `r${String(index)}`, minute(10 + index), original),
+        ),
+        project(author, 'c1', minute(20)),
+        project(author, 'c2', minute(21)),
+        project(author, 'c3', minute(22)),
+        organization(author, minute(23)),
+      ])
+
+      expect(labels(await service.getFeed(request()))).toEqual([
+        'organization:self',
+        'project:c3',
+        'project:c2',
+        'project:c1',
+        'repost:r3',
+        'repost:r2',
+        'repost:r1',
+        'repost:r0',
+        'post:p3',
+        'post:p2',
+        'post:p1',
+        'post:p0',
+      ])
+    })
+  })
+
+  describe('audio groups', () => {
+    it('groups recordings by owner and recorder folder, whatever lies between them', async () => {
       const did = randomDid()
       const folderA = `at://${did}/app.gainforest.ac.deployment/a`
       const folderB = `at://${did}/app.gainforest.ac.deployment/b`
@@ -1152,7 +1172,6 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
         audio(did, 'b1', minute(180), folderB),
         audio(did, 'none1', minute(240)),
         audio(did, 'none2', minute(300)),
-        // The same folder as a1 and a2, but other recordings lie between.
         audio(did, 'a-late', minute(360), folderA),
       ])
 
@@ -1160,56 +1179,24 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
       expect(modelOf(output.feed)).toEqual([
         {
-          type: 'audio',
+          type: 'group',
+          kind: 'audio',
           did,
           deployment: folderA,
-          total: 1,
-          from: Date.parse(minute(360)),
-          to: Date.parse(minute(360)),
-          subjects: [`at://${did}/${AUDIO}/a-late`],
-          run: 0,
-          continued: false,
-          capped: false,
-        },
-        {
-          type: 'audio',
-          did,
-          deployment: null,
-          total: 2,
-          from: Date.parse(minute(240)),
-          to: Date.parse(minute(300)),
-          subjects: [
-            `at://${did}/${AUDIO}/none2`,
-            `at://${did}/${AUDIO}/none1`,
-          ],
-          run: 1,
-          continued: false,
-          capped: false,
-        },
-        {
-          type: 'audio',
-          did,
-          deployment: folderB,
-          total: 1,
-          from: Date.parse(minute(180)),
-          to: Date.parse(minute(180)),
-          subjects: [`at://${did}/${AUDIO}/b1`],
-          run: 2,
-          continued: false,
-          capped: false,
-        },
-        {
-          type: 'audio',
-          did,
-          deployment: folderA,
-          total: 2,
+          total: 3,
           from: Date.parse(minute(60)),
-          to: Date.parse(minute(120)),
-          subjects: [`at://${did}/${AUDIO}/a2`, `at://${did}/${AUDIO}/a1`],
-          run: 3,
-          continued: false,
-          capped: false,
+          to: Date.parse(minute(360)),
+          subjects: [
+            `at://${did}/${AUDIO}/a-late`,
+            `at://${did}/${AUDIO}/a2`,
+            `at://${did}/${AUDIO}/a1`,
+          ],
+          groupIndex: 0,
+          more: false,
         },
+        audioRecordOf(did, 'none2', minute(300)),
+        audioRecordOf(did, 'none1', minute(240)),
+        audioRecordOf(did, 'b1', minute(180)),
       ])
       expect(() => $output.schema.$parse(output)).not.toThrow()
     })
@@ -1228,7 +1215,8 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
       expect(output.feed).toHaveLength(1)
       expect(output.feed[0]).toMatchObject({
-        $type: 'app.gainforest.feed.defs#audioItem',
+        $type: 'app.gainforest.feed.defs#groupItem',
+        kind: 'audio',
         did: organizationDid,
         deployment: folder,
         total: 3,
@@ -1241,30 +1229,6 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       expect(() => $output.schema.$parse(output)).not.toThrow()
     })
 
-    it("scopes the following feed to the folder's owner, not to who stored the recording", async () => {
-      const organizationDid = randomDid()
-      const member = randomDid()
-      const viewerOfOrganization = randomDid()
-      const viewerOfMember = randomDid()
-      const folder = `at://${organizationDid}/app.gainforest.ac.deployment/f`
-      await fixture.seed([
-        audio(member, 'member1', minute(1), folder),
-        follow(viewerOfOrganization, organizationDid),
-        follow(viewerOfMember, member),
-      ])
-
-      const organizationFeed = await service.getFeed(
-        request({ following: true, viewerDid: viewerOfOrganization }),
-      )
-      const memberFeed = await service.getFeed(
-        request({ following: true, viewerDid: viewerOfMember }),
-      )
-
-      expect(labels(organizationFeed)).toEqual(['audio(1):member1'])
-      expect(organizationFeed.feed[0]).toMatchObject({ did: organizationDid })
-      expect(memberFeed).toEqual({ feed: [] })
-    })
-
     it('groups recordings without a folder by their own account', async () => {
       const first = randomDid()
       const second = randomDid()
@@ -1272,18 +1236,14 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
         audio(first, 'a1', minute(1)),
         audio(first, 'a2', minute(2)),
         audio(second, 'b1', minute(3)),
+        audio(first, 'a3', minute(4)),
       ])
 
       const items = (await service.getFeed(request({ filter: 'audio' }))).feed
 
-      expect(items.map((item) => item.$type)).toEqual([
-        'app.gainforest.feed.defs#audioItem',
-        'app.gainforest.feed.defs#audioItem',
-      ])
-      expect(modelOf(items)).toMatchObject([
-        { did: second, total: 1, deployment: null },
-        { did: first, total: 2, deployment: null },
-      ])
+      expect(labels({ feed: items })).toEqual(['audio(3):a3,a2,a1', 'audio:b1'])
+      expect(groupsOf(items)[0]).toMatchObject({ did: first })
+      expect(groupsOf(items)[0]).not.toHaveProperty('deployment')
     })
 
     it("falls back to the recording's account when the folder's authority is not a DID", async () => {
@@ -1291,15 +1251,19 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       const second = randomDid()
       const folder = 'at://alice.example/app.gainforest.ac.deployment/f'
       await fixture.seed([
-        audio(first, 'a1', minute(1), folder),
-        audio(second, 'b1', minute(2), folder),
+        ...['a1', 'a2', 'a3'].map((rkey, index) =>
+          audio(first, rkey, minute(index + 1), folder),
+        ),
+        ...['b1', 'b2', 'b3'].map((rkey, index) =>
+          audio(second, rkey, minute(index + 4), folder),
+        ),
       ])
 
       const output = await service.getFeed(request({ filter: 'audio' }))
 
       expect(modelOf(output.feed)).toMatchObject([
-        { did: second, deployment: folder, total: 1 },
-        { did: first, deployment: folder, total: 1 },
+        { did: second, deployment: folder, total: 3 },
+        { did: first, deployment: folder, total: 3 },
       ])
       expect(() => $output.schema.$parse(output)).not.toThrow()
     })
@@ -1309,19 +1273,21 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       await fixture.seed([
         audio(did, 'a1', minute(1), 'not-a-uri'),
         audio(did, 'a2', minute(2)),
+        audio(did, 'a3', minute(3)),
       ])
 
-      expect(
-        labels(await service.getFeed(request({ filter: 'audio' }))),
-      ).toEqual(['audio(2):a2,a1'])
+      const output = await service.getFeed(request({ filter: 'audio' }))
+
+      expect(labels(output)).toEqual(['audio(3):a3,a2,a1'])
+      expect(output.feed[0]).not.toHaveProperty('deployment')
     })
 
-    // The owner of a folder is `audioItem.did` and the folder is
-    // `audioItem.deployment`. The Lexicon wants a DID and an AT-URI, and the
+    // The owner of a folder is `groupItem.did` and the folder is
+    // `groupItem.deployment`. The Lexicon wants a DID and an AT-URI, and the
     // output check applies both strictly: one value that fails used to answer
     // 500 on every `getFeed` page that held the recording. An authority that is
     // not a valid DID therefore does not become the owner (the recording's own
-    // account owns the run), and a folder that is not a valid AT-URI is left
+    // account owns the group), and a folder that is not a valid AT-URI is left
     // out of the item. The recordings group by the folder either way.
     it.each([
       ['an authority with no method or id', 'at://did:/x'],
@@ -1336,6 +1302,8 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
         const uploader = randomDid()
         await fixture.seed([
           audio(uploader, 'a1', minute(2), folder),
+          audio(uploader, 'a2', minute(3), folder),
+          audio(uploader, 'a3', minute(4), folder),
           post(randomDid(), 'p1', minute(1)),
         ])
 
@@ -1344,9 +1312,10 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
           expect(feed.status, `getFeed ${filter}`).toBe(200)
           const item = $output.schema.$parse(feed.body).feed[0]
           expect(item, filter).toMatchObject({
-            $type: 'app.gainforest.feed.defs#audioItem',
+            $type: 'app.gainforest.feed.defs#groupItem',
+            kind: 'audio',
             did: uploader,
-            total: 1,
+            total: 3,
           })
           expect(item, filter).not.toHaveProperty('deployment')
 
@@ -1357,14 +1326,20 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
               .$parse(skeleton.body)
               .feed.map(({ subject }) => subject),
             filter,
-          ).toContain(`at://${uploader}/${AUDIO}/a1`)
+          ).toEqual(
+            expect.arrayContaining(
+              ['a1', 'a2', 'a3'].map(
+                (rkey) => `at://${uploader}/${AUDIO}/${rkey}`,
+              ),
+            ),
+          )
         }
       },
     )
 
-    // The owner and the folder are judged apart: a valid DID owns the run even
-    // when the rest of the AT-URI is not valid, and then only the folder is
-    // left out.
+    // The owner and the folder are judged apart: a valid DID owns the group
+    // even when the rest of the AT-URI is not valid, and then only the folder
+    // is left out.
     it.each([
       ['a path that is not a collection and a key', '/x'],
       ['a trailing slash', '/app.gainforest.ac.deployment/f/'],
@@ -1375,9 +1350,12 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       async (_reason, path) => {
         const organizationDid = randomDid()
         const uploader = randomDid()
-        await fixture.seed([
-          audio(uploader, 'a1', minute(1), `at://${organizationDid}${path}`),
-        ])
+        const folder = `at://${organizationDid}${path}`
+        await fixture.seed(
+          ['a1', 'a2', 'a3'].map((rkey, index) =>
+            audio(uploader, rkey, minute(index + 1), folder),
+          ),
+        )
 
         const { status, body } = await call(
           'getFeed',
@@ -1386,7 +1364,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
 
         expect(status).toBe(200)
         const item = $output.schema.$parse(body).feed[0]
-        expect(item).toMatchObject({ did: organizationDid, total: 1 })
+        expect(item).toMatchObject({ did: organizationDid, total: 3 })
         expect(item).not.toHaveProperty('deployment')
       },
     )
@@ -1396,16 +1374,19 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       const other = randomDid()
       const folder = 'at://did:/x'
       await fixture.seed([
-        audio(first, 'a1', minute(1), folder),
-        audio(first, 'a2', minute(2), folder),
-        audio(other, 'b1', minute(3), folder),
+        ...['a1', 'a2', 'a3'].map((rkey, index) =>
+          audio(first, rkey, minute(index + 1), folder),
+        ),
+        ...['b1', 'b2', 'b3'].map((rkey, index) =>
+          audio(other, rkey, minute(index + 4), folder),
+        ),
       ])
 
       const items = (await service.getFeed(request({ filter: 'audio' }))).feed
 
       expect(modelOf(items)).toMatchObject([
-        { did: other, total: 1 },
-        { did: first, total: 2 },
+        { did: other, total: 3 },
+        { did: first, total: 3 },
       ])
     })
 
@@ -1413,7 +1394,11 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       const uploader = randomDid()
       const folder =
         'at://did:web:recorders.example.com/app.gainforest.ac.deployment/f'
-      await fixture.seed([audio(uploader, 'a1', minute(1), folder)])
+      await fixture.seed(
+        ['a1', 'a2', 'a3'].map((rkey, index) =>
+          audio(uploader, rkey, minute(index + 1), folder),
+        ),
+      )
 
       const output = await service.getFeed(request({ filter: 'audio' }))
 
@@ -1424,7 +1409,21 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       expect(() => $output.schema.$parse(output)).not.toThrow()
     })
 
-    it('is broken by an interleaved row of another kind, owner, or folder', async () => {
+    it('joins recordings exactly 12 hours apart and splits a longer gap', async () => {
+      const did = randomDid()
+      await fixture.seed([
+        audio(did, 'a', minute(0)),
+        audio(did, 'b', minute(12 * 60)),
+        audio(did, 'c', minute(12 * 60 + 12 * 60)),
+        audio(did, 'd', minute(12 * 60 + 12 * 60 + 12 * 60 + 1)),
+      ])
+
+      expect(
+        labels(await service.getFeed(request({ filter: 'audio' }))),
+      ).toEqual(['audio:d', 'audio(3):c,b,a'])
+    })
+
+    it('is not broken by an interleaved row of another kind, owner, or folder', async () => {
       const did = randomDid()
       const other = randomDid()
       const folder = `at://${did}/app.gainforest.ac.deployment/f`
@@ -1449,362 +1448,301 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       const output = await service.getFeed(request())
 
       expect(labels(output)).toEqual([
-        'audio(1):e1',
-        'audio(1):between-d',
-        'audio(2):d2,d1',
+        'audio(9):e1,d2,d1,c2,c1,b2,b1,a2,a1',
+        'audio:between-d',
         'observation:between-c',
-        'audio(2):c2,c1',
-        'audio(1):between-b',
-        'audio(2):b2,b1',
+        'audio:between-b',
         'post:between-a',
-        'audio(2):a2,a1',
       ])
     })
 
-    it('joins recordings exactly 12 hours apart and splits a longer gap', async () => {
-      const did = randomDid()
-      await fixture.seed([
-        audio(did, 'a', minute(0)),
-        audio(did, 'b', minute(12 * 60)),
-        audio(did, 'c', minute(12 * 60 + 12 * 60)),
-        audio(did, 'd', minute(12 * 60 + 12 * 60 + 12 * 60 + 1)),
-      ])
-
-      expect(
-        labels(await service.getFeed(request({ filter: 'audio' }))),
-      ).toEqual(['audio(1):d', 'audio(3):c,b,a'])
-    })
-
-    it('is not broken by an interleaved row the active filter excludes', async () => {
+    it('groups the same recordings whether or not the filter keeps the rows between them', async () => {
       const did = randomDid()
       await fixture.seed([
         audio(did, 'a1', minute(1)),
         post(randomDid(), 'between', minute(2)),
         audio(did, 'a2', minute(3)),
+        audio(did, 'a3', minute(4)),
       ])
 
       expect(
         labels(await service.getFeed(request({ filter: 'audio' }))),
-      ).toEqual(['audio(2):a2,a1'])
+      ).toEqual(['audio(3):a3,a2,a1'])
       expect(labels(await service.getFeed(request()))).toEqual([
-        'audio(1):a2',
+        'audio(3):a3,a2,a1',
         'post:between',
-        'audio(1):a1',
       ])
     })
   })
 
-  describe('groups longer than the cap', () => {
-    const pad = (index: number): string => String(index).padStart(4, '0')
-
-    /** Seeds `count` rows of one run, one second apart, and an older post that ends it. */
-    const seedRun = async (
-      kind: 'observation' | 'audio',
-      count: number,
-    ): Promise<{ owner: string; folder: string }> => {
-      const owner = randomDid()
-      const folder = `at://${owner}/app.gainforest.ac.deployment/run`
-      await fixture.seed([
-        ...Array.from({ length: count }, (_, index) =>
-          kind === 'audio'
-            ? audio(owner, `r${pad(index)}`, second(index), folder)
-            : observation(owner, `r${pad(index)}`, second(index)),
-        ),
-        post(randomDid(), 'older', minute(-1_000)),
-      ])
-      return { owner, folder }
-    }
-
-    it('cuts a 1,700-recording run into 9 chunks and carries the run over page boundaries', async () => {
-      const { owner } = await seedRun('audio', 1_700)
-
-      const pages = await walk({}, 4)
-
-      const items = pages.flatMap((page) => page.feed)
-      expect(flagsOf(items)).toEqual(
-        Array.from({ length: 9 }, (_, index) => ({
-          type: 'audioItem',
-          total: index < 8 ? 200 : 100,
-          continued: index > 0,
-          capped: index < 8,
-        })),
-      )
-      expect(new Set(chunksOf(items).map((chunk) => chunk.groupKey)).size).toBe(
-        1,
-      )
-      expect(labels({ feed: items.slice(9) })).toEqual(['post:older'])
-      expect(pages.map((page) => page.feed.length)).toEqual([4, 4, 2])
-
-      // The first chunk of the second page continues the last chunk of the
-      // first page: same key, and the cursor said so.
-      const lastOfFirst = pages[0]?.feed.at(-1)
-      const firstOfSecond = pages[1]?.feed[0]
-      expect(lastOfFirst).toMatchObject({ capped: true, continued: true })
-      expect(firstOfSecond).toMatchObject({ continued: true })
-      expect(firstOfSecond).toHaveProperty(
-        'groupKey',
-        lastOfFirst && 'groupKey' in lastOfFirst ? lastOfFirst.groupKey : '',
-      )
-      expect(
-        decodeCursor(ACTIVITY_FEED_ID, pages[0]?.cursor, timestampUriCursor),
-      ).toEqual({
-        value: expect.any(String) as unknown,
-        uri: `at://${owner}/${AUDIO}/r${pad(900)}`,
-        group: {
-          key:
-            lastOfFirst && 'groupKey' in lastOfFirst
-              ? lastOfFirst.groupKey
-              : '',
-          kind: 'audio',
-        },
-      })
-      // The next chunk starts right after the 200 rows of this one.
-      expect(items[1]).toMatchObject({
-        subjects: Array.from(
-          { length: 20 },
-          (_, index) => `at://${owner}/${AUDIO}/r${pad(1_499 - index)}`,
-        ),
-      })
-      for (const page of pages) {
-        expect(() => $output.schema.$parse(page)).not.toThrow()
-      }
-    })
-
-    it('gives the same chunks whatever the page size', async () => {
-      await seedRun('audio', 1_700)
-
-      const reference = flagsOf(await allItems({}, 50))
-      for (const limit of [1, 2, 3, 9, 10]) {
-        expect(
-          flagsOf(await allItems({}, limit)),
-          `limit ${String(limit)}`,
-        ).toEqual(reference)
-      }
-    })
-
-    // The cursor does not carry the owner or the folder: the statement derives
-    // them from the cursor row with the expression the audio arm uses. A run
-    // must therefore continue across a page boundary whatever shape its owner
-    // and folder have, including when the recordings are stored by other
-    // accounts than the folder's owner.
-    it.each([
-      ['a folder owned by another account, stored by two members', 'owned'],
-      ['a folder named by handle', 'handle'],
-      ['no folder', 'none'],
-      ['a folder whose authority is not a DID', 'malformed'],
-    ] as const)(
-      'continues an audio run across pages for %s',
-      async (_name, shape) => {
-        const organizationDid = randomDid()
-        const uploaders = [randomDid(), randomDid()] as const
-        const folder = {
-          owned: `at://${organizationDid}/app.gainforest.ac.deployment/f`,
-          handle: 'at://recorders.example/app.gainforest.ac.deployment/f',
-          none: undefined,
-          malformed: 'at://did:/x',
-        }[shape]
-        // Only a folder owned by another account lets two uploaders share a run.
-        const uploaderOf = (index: number): string =>
-          shape === 'owned'
-            ? (uploaders[index % 2] ?? uploaders[0])
-            : uploaders[0]
-        await fixture.seed([
-          ...Array.from({ length: 8 }, (_, index) =>
-            audio(uploaderOf(index), `r${pad(index)}`, second(index), folder),
-          ),
-          post(randomDid(), 'older', minute(-1_000)),
-        ])
-        const small = serviceFor(3)
-
-        const items = await allItems({}, 1, small)
-
-        expect(flagsOf(items.slice(0, 3))).toEqual([
-          { type: 'audioItem', total: 3, continued: false, capped: true },
-          { type: 'audioItem', total: 3, continued: true, capped: true },
-          { type: 'audioItem', total: 2, continued: true, capped: false },
-        ])
-        expect(
-          new Set(chunksOf(items).map((chunk) => chunk.groupKey)).size,
-        ).toBe(1)
-        expect(items[0]).toMatchObject({
-          did: shape === 'owned' ? organizationDid : uploaders[0],
-        })
-      },
-    )
-
-    it('cuts a 450-observation burst into chunks of 200, 200, and 50', async () => {
-      const { owner } = await seedRun('observation', 450)
+  describe('interleaved uploads', () => {
+    it('gives two recorders that upload at the same time one card each, not many short ones', async () => {
+      const first = dumpOf('first', 30, 3, 1_000)
+      const other = dumpOf('other', 25, 4, 1_001)
+      await fixture.seed([...first.records, ...other.records])
 
       const output = await service.getFeed(request())
 
-      expect(flagsOf(output.feed)).toEqual([
-        { type: 'burstItem', total: 200, continued: false, capped: true },
-        { type: 'burstItem', total: 200, continued: true, capped: true },
-        { type: 'burstItem', total: 50, continued: true, capped: false },
+      expect(modelOf(output.feed)).toMatchObject([
+        { type: 'group', did: other.owner, total: 25, groupIndex: 0 },
+        { type: 'group', did: first.owner, total: 30, groupIndex: 1 },
       ])
-      expect(modelOf(output.feed.slice(0, 3))).toMatchObject([
-        {
-          did: owner,
-          from: Date.parse(second(250)),
-          to: Date.parse(second(449)),
-        },
-        {
-          did: owner,
-          from: Date.parse(second(50)),
-          to: Date.parse(second(249)),
-        },
-        { did: owner, from: Date.parse(second(0)), to: Date.parse(second(49)) },
-      ])
-      expect(output.feed[0]).toMatchObject({
-        subjects: Array.from(
-          { length: 20 },
-          (_, index) => `at://${owner}/${OBSERVATION}/r${pad(449 - index)}`,
-        ),
-      })
-      expect(() => $output.schema.$parse(output)).not.toThrow()
+      expect(new Set(groupsOf(output.feed).map((g) => g.groupKey)).size).toBe(2)
     })
 
-    it.each([
-      [199, [{ total: 199, continued: false, capped: false }]],
-      [200, [{ total: 200, continued: false, capped: false }]],
-      [
-        201,
-        [
-          { total: 200, continued: false, capped: true },
-          { total: 1, continued: true, capped: false },
-        ],
-      ],
-    ])(
-      'does not cap a run of exactly 200 and cuts one row off a run of 201 (%i observations)',
-      async (count, expected) => {
-        await seedRun('observation', count)
-
-        const items = (await service.getFeed(request())).feed
-
-        expect(chunksOf(items)).toMatchObject(
-          expected.map((chunk) => ({ type: 'burstItem', ...chunk })),
-        )
-      },
-    )
-
-    it('keeps the single row after a full chunk a group chunk, so clients merge it into the run', async () => {
-      await seedRun('observation', 201)
-
-      const items = (await service.getFeed(request())).feed
-
-      expect(items.map((item) => item.$type)).toEqual([
-        'app.gainforest.feed.defs#burstItem',
-        'app.gainforest.feed.defs#burstItem',
-        'app.gainforest.feed.defs#recordItem',
-      ])
-      const [head, rest] = chunksOf(items)
-      expect(rest?.groupKey).toBe(head?.groupKey)
-    })
-
-    it('treats audio the same way: 200 is one item and 201 is 200 plus 1', async () => {
-      await seedRun('audio', 201)
-
-      const items = (await service.getFeed(request())).feed
-
-      expect(flagsOf(items)).toEqual([
-        { type: 'audioItem', total: 200, continued: false, capped: true },
-        { type: 'audioItem', total: 1, continued: true, capped: false },
-      ])
-    })
-
-    it.each([
-      [12 * 60, true],
-      [12 * 60 + 1, false],
-    ])(
-      'continues a run past a full chunk only when the next row is within 12 hours: %i minutes older, continues %s',
-      async (gapMinutes, joins) => {
-        const did = randomDid()
-        // 200 rows a minute apart, then 50 more after the gap.
-        const newest = Array.from({ length: 200 }, (_, index) =>
-          observation(did, `new${pad(index)}`, minute(2_000 + index)),
-        )
-        const older = Array.from({ length: 50 }, (_, index) =>
-          observation(
-            did,
-            `old${pad(index)}`,
-            minute(2_000 - gapMinutes - index),
-          ),
-        )
-        await fixture.seed([...newest, ...older])
-
-        const chunks = chunksOf((await service.getFeed(request())).feed)
-
-        expect(chunks.map(({ groupKey: _key, ...chunk }) => chunk)).toEqual([
-          { type: 'burstItem', total: 200, continued: false, capped: joins },
-          { type: 'burstItem', total: 50, continued: joins, capped: false },
-        ])
-        expect(chunks[1]?.groupKey === chunks[0]?.groupKey).toBe(joins)
-      },
-    )
-
-    it.each([
-      [60, true],
-      [12 * 60, true],
-      [12 * 60 + 1, false],
-    ])(
-      'continues the run a cursor left open only when the next row is within 12 hours of the cursor: %i minutes, continues %s',
-      async (gapMinutes, continues) => {
-        const did = randomDid()
-        // The row the previous page ended at, in the run the cursor names.
-        const previous = observation(did, 'previous', minute(5_000))
-        await fixture.seed([
-          previous,
-          ...Array.from({ length: 3 }, (_, index) =>
-            observation(
-              did,
-              `o${String(index)}`,
-              minute(5_000 - gapMinutes - index),
-            ),
-          ),
-        ])
-        const key = 'AAAAAAAAAAAAAAAAAAAAAA'
-        const cursor = encodeCursor(
-          ACTIVITY_FEED_ID,
-          {
-            sortValue: previous.createdAt ?? '',
-            uri: uriOf(previous),
-            group: { key, kind: 'observation' },
-          },
-          timestampUriCursor,
-        )
-
-        const items = (await service.getFeed(request({ cursor }))).feed
-
-        expect(chunksOf(items)).toMatchObject([
-          { total: 3, continued: continues, capped: false },
-        ])
-        expect(chunksOf(items)[0]?.groupKey === key).toBe(continues)
-      },
-    )
-
-    it('settles every page in one statement, however long the runs are', async () => {
-      const owner = randomDid()
-      const folder = `at://${owner}/app.gainforest.ac.deployment/run`
+    it('gives the sightings of one account inside an audio dump one observation card', async () => {
+      const first = dumpOf('first', 60, 3, 1_000)
+      const other = dumpOf('other', 50, 4, 1_001)
+      const citizen = randomDid()
       await fixture.seed([
-        ...Array.from({ length: 1_700 }, (_, index) =>
-          audio(owner, `r${pad(index)}`, second(index), folder),
+        ...first.records,
+        ...other.records,
+        ...Array.from({ length: 8 }, (_, index) =>
+          observation(citizen, `o${String(index)}`, second(900 - index * 20)),
         ),
-        ...Array.from({ length: 450 }, (_, index) =>
-          observation(owner, `o${pad(index)}`, second(-10_000 - index)),
+        // A day before the others: more than 12 hours from the nearest
+        // sighting, so it stands alone.
+        observation(citizen, 'far', second(-86_400)),
+      ])
+
+      const output = await service.getFeed(request())
+
+      expect(
+        groupsOf(output.feed).map(
+          ({ kind, total }) => `${kind}:${String(total)}`,
         ),
+      ).toEqual(['audio:50', 'audio:60', 'observation:8'])
+      expect(
+        labels(output).filter((entry) => entry === 'observation:far'),
+      ).toEqual(['observation:far'])
+    })
+
+    // Two recorders uploaded 1,700 and 1,400 recordings, three and four
+    // seconds apart, at the same time. Adjacent-row grouping made hundreds of
+    // cards of one to three recordings, and the feed was a wall of audio.
+    it('shows posts and observations, not a wall of audio, when two recorders dump at once', async () => {
+      const first = dumpOf('first', 1_700, 3, 20_000)
+      const other = dumpOf('other', 1_400, 4, 20_050)
+      const citizen = randomDid()
+      const fieldworker = randomDid()
+      const poster = randomDid()
+      await fixture.seed([
+        ...first.records,
+        ...other.records,
+        // A field session in the middle of the dump, and an older one.
+        ...Array.from({ length: 40 }, (_, index) =>
+          observation(
+            citizen,
+            `session${String(index)}`,
+            second(15_000 - index * 30),
+          ),
+        ),
+        ...Array.from({ length: 12 }, (_, index) =>
+          observation(
+            fieldworker,
+            `old${String(index)}`,
+            second(-40_000 - index * 60),
+          ),
+        ),
+        // Posts before the dump, and older posts.
         ...Array.from({ length: 30 }, (_, index) =>
-          post(randomDid(), `p${pad(index)}`, minute(-3_000 - index)),
+          post(
+            poster,
+            `post${String(index).padStart(2, '0')}`,
+            second(-3_600 - index * 1_800),
+          ),
+        ),
+        post(poster, 'newest', second(21_000)),
+      ])
+      const counted = countingService()
+
+      const { pages, statements } = await walkCounted(counted, {}, 20)
+
+      const firstPage = pages[0]?.feed ?? []
+      const firstThree = pages.slice(0, 3).flatMap((page) => page.feed)
+      expect(
+        groupsOf(firstPage).map(({ kind, total }) => [kind, total]),
+      ).toEqual(
+        expect.arrayContaining([
+          ['audio', 1_700],
+          ['audio', 1_400],
+          ['observation', 40],
+        ]),
+      )
+      // Two audio cards cover the 3,100 recordings; no recording stands alone.
+      expect(
+        firstThree.filter(
+          (item) =>
+            item.$type === 'app.gainforest.feed.defs#recordItem' &&
+            item.kind === 'audio',
+        ),
+      ).toEqual([])
+      expect(
+        firstThree.filter(
+          (item) =>
+            item.$type === 'app.gainforest.feed.defs#groupItem' &&
+            item.kind === 'audio',
+        ),
+      ).toHaveLength(2)
+      expect(
+        firstThree.map(label).filter((entry) => entry.startsWith('post:')),
+      ).not.toEqual([])
+      // 3,157 rows are consumed, and the next row shows that the page is full:
+      // 7 statements of 500 rows.
+      expect(statements[0]).toBe(7)
+      for (const count of statements) expect(count).toBeLessThanOrEqual(10)
+      expect(
+        groupsOf(pages.flatMap((page) => page.feed)).some(
+          (group) => group.more === true,
+        ),
+      ).toBe(false)
+    })
+  })
+
+  describe('the row budget', () => {
+    it('ends a page at 5,000 rows, says more on the open cards, and a client merge restores the totals', async () => {
+      // 4,000 and 3,000 recordings three and four seconds apart, both ending
+      // at second 20,000: 7,000 rows, more than one request may consume.
+      await fixture.seed([
+        ...dumpOf('first', 4_000, 3, 20_000).records,
+        ...dumpOf('other', 3_000, 4, 20_000).records,
+        ...Array.from({ length: 30 }, (_, index) =>
+          post(
+            randomDid(),
+            `old${String(index).padStart(2, '0')}`,
+            second(-3_600 - index * 60),
+          ),
         ),
       ])
       const counted = countingService()
 
-      for (const limit of [1, 3, 20, 50]) {
-        counted.reset()
-        const pages = await walk({}, limit, counted.service)
-        expect(counted.statements(), `limit ${String(limit)}`).toBe(
-          pages.length,
-        )
-      }
+      const { pages, statements } = await walkCounted(counted, {}, 20)
+
+      const [firstPage, secondPage] = pages
+      expect(statements[0]).toBe(REQUEST_ROWS / BATCH_ROWS)
+      expect(groupsOf(firstPage?.feed ?? [])).toHaveLength(2)
+      expect(
+        groupsOf(firstPage?.feed ?? []).reduce(
+          (sum, group) => sum + group.total,
+          0,
+        ),
+      ).toBe(REQUEST_ROWS)
+      expect(
+        groupsOf(firstPage?.feed ?? []).map((group) => group.more),
+      ).toEqual([true, true])
+      expect(firstPage?.cursor).toBeDefined()
+      // The next page continues both groups under the same keys.
+      expect(
+        groupsOf(secondPage?.feed ?? [])
+          .map((group) => group.groupKey)
+          .sort(),
+      ).toEqual(
+        groupsOf(firstPage?.feed ?? [])
+          .map((group) => group.groupKey)
+          .sort(),
+      )
+      expect(
+        groupsOf(secondPage?.feed ?? []).reduce(
+          (sum, group) => sum + group.total,
+          0,
+        ),
+      ).toBe(2_000)
+      for (const count of statements) expect(count).toBeLessThanOrEqual(10)
+
+      // The documented client merge adds the cards of one group back up.
+      expect(
+        mergeGroups(pages)
+          .map(({ total, more }) => [total, more])
+          .sort(),
+      ).toEqual([
+        [3_000, false],
+        [4_000, false],
+      ])
+    })
+
+    it('never says more when the data or a full page ended the page', async () => {
+      const owner = randomDid()
+      await fixture.seed([
+        ...Array.from({ length: 30 }, (_, index) =>
+          audio(owner, `a${String(index).padStart(2, '0')}`, second(index)),
+        ),
+        post(owner, 'older', minute(-1_000)),
+      ])
+
+      const pages = await walk({}, 1)
+
+      expect(
+        pages.flatMap((page) => groupsOf(page.feed)).map((g) => g.more),
+      ).toEqual([undefined])
+    })
+
+    it('ends a small page at a small budget in the same way', async () => {
+      const owner = randomDid()
+      await fixture.seed(
+        Array.from({ length: 20 }, (_, index) =>
+          audio(owner, `a${String(index).padStart(2, '0')}`, second(index)),
+        ),
+      )
+      const small = serviceFor({ batchRows: 4, requestRows: 8 })
+
+      const pages = await walk({}, 5, small)
+
+      expect(
+        pages.map((page) =>
+          groupsOf(page.feed).map(({ total, more }) => [total, more]),
+        ),
+      ).toEqual([[[8, true]], [[8, true]], [[4, undefined]]])
+    })
+  })
+
+  describe('statements per request', () => {
+    it('runs one statement when the first batch fills the page', async () => {
+      const did = randomDid()
+      await fixture.seed(
+        Array.from({ length: 100 }, (_, index) =>
+          post(did, `p${String(index).padStart(3, '0')}`, minute(index)),
+        ),
+      )
+      const counted = countingService()
+
+      const page = await counted.service.getFeed(request({ limit: 20 }))
+
+      expect(page.feed).toHaveLength(20)
+      expect(counted.statements()).toBe(1)
+    })
+
+    it('runs one more statement for a page that ends exactly at the end of a batch', async () => {
+      const did = randomDid()
+      await fixture.seed(
+        Array.from({ length: 12 }, (_, index) =>
+          post(did, `p${String(index).padStart(3, '0')}`, minute(index)),
+        ),
+      )
+      const counted = countingService({ batchRows: 4 })
+
+      // Rows 0 to 7 fill the page; row 8 is in the third batch.
+      await counted.service.getFeed(request({ limit: 8 }))
+      expect(counted.statements()).toBe(3)
+
+      counted.reset()
+      // Rows 0 to 3 fill the page; the row that shows it is full is in the second batch.
+      await counted.service.getFeed(request({ limit: 4 }))
+      expect(counted.statements()).toBe(2)
+    })
+
+    it('runs a statement per batch a long group needs and never more than ten', async () => {
+      const owner = randomDid()
+      await fixture.seed([
+        ...Array.from({ length: 6_000 }, (_, index) =>
+          audio(owner, `a${String(index).padStart(5, '0')}`, second(index)),
+        ),
+        post(owner, 'older', minute(-1_000)),
+      ])
+      const counted = countingService()
+
+      const { statements } = await walkCounted(counted, {}, 20)
+
+      expect(statements).toEqual([10, 3])
     })
   })
 
@@ -1831,7 +1769,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       ])
     })
 
-    it('never points the next page into the middle of a burst', async () => {
+    it('ends a page before the row that would start another card, never in the middle of a group', async () => {
       const did = randomDid()
       const other = randomDid()
       await fixture.seed([
@@ -1851,7 +1789,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       expect(pages.map(labels)).toEqual([
         [
           'post:newest',
-          `burst(30):${Array.from({ length: 20 }, (_, index) => `o${String(29 - index).padStart(2, '0')}`).join(',')}`,
+          `observation(30):${Array.from({ length: 20 }, (_, index) => `o${String(29 - index).padStart(2, '0')}`).join(',')}`,
         ],
         ['post:oldest'],
       ])
@@ -1881,19 +1819,78 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       expect(rest.cursor).toBeUndefined()
     })
 
-    it('rejects a version 1 cursor, which cannot say whether a run continues', async () => {
-      const cursor = Buffer.from(
-        JSON.stringify({
-          version: 1,
-          feedId: ACTIVITY_FEED_ID,
-          value: { value: minute(1), uri: 'at://did:plc:x/y/z' },
-        }),
-      ).toString('base64url')
+    // A cursor that the service issued before this version could not say, or
+    // said by naming a group, how a page continues a card. Clients start again.
+    it.each([1, 2])(
+      'rejects a version %i cursor and says to request the first page again',
+      async (version) => {
+        const cursor = Buffer.from(
+          JSON.stringify({
+            version,
+            feedId: ACTIVITY_FEED_ID,
+            value: { value: minute(1), uri: 'at://did:plc:x/y/z' },
+          }),
+        ).toString('base64url')
 
-      await expect(service.getFeed(request({ cursor }))).rejects.toMatchObject({
-        code: 'InvalidCursor',
-        message: expect.stringContaining('version must be 2') as unknown,
-      })
+        for (const procedure of ['getFeed', 'getFeedSkeleton'] as const) {
+          const { status, body } = await call(procedure, request({ cursor }))
+
+          expect(status, procedure).toBe(400)
+          expect(body, procedure).toMatchObject({
+            error: 'InvalidCursor',
+            message: expect.stringContaining('version must be 3') as unknown,
+          })
+        }
+      },
+    )
+
+    it('splits a group at a page edge into cards that share one groupKey, and the documented merge joins them', async () => {
+      const did = randomDid()
+      await fixture.seed([
+        ...Array.from({ length: 12 }, (_, index) =>
+          observation(did, `o${String(index).padStart(2, '0')}`, minute(index)),
+        ),
+        // Between o06 and o07, so a page of one card ends at it.
+        post(randomDid(), 'edge', minute(6.5)),
+      ])
+
+      const pages = await walk({}, 1)
+
+      expect(pages.map(labels)).toEqual([
+        [
+          `observation(5):${['11', '10', '09', '08', '07'].map((n) => `o${n}`).join(',')}`,
+        ],
+        ['post:edge'],
+        [
+          `observation(7):${['06', '05', '04', '03', '02', '01', '00'].map((n) => `o${n}`).join(',')}`,
+        ],
+      ])
+      const [head, , tail] = pages.map((page) => groupsOf(page.feed)[0])
+      expect(head?.groupKey).toBeDefined()
+      expect(tail?.groupKey).toBe(head?.groupKey)
+      expect(mergeGroups(pages)).toMatchObject([{ total: 12, more: false }])
+    })
+
+    it('does not merge a later card of the same group after a gap of more than 12 hours', async () => {
+      const did = randomDid()
+      await fixture.seed([
+        ...['a', 'b', 'c'].map((rkey, index) =>
+          observation(did, `new-${rkey}`, minute(2_000 + index)),
+        ),
+        post(randomDid(), 'edge', minute(1_000)),
+        ...['a', 'b', 'c'].map((rkey, index) =>
+          observation(did, `old-${rkey}`, minute(index)),
+        ),
+      ])
+
+      const pages = await walk({}, 1)
+
+      expect(mergeGroups(pages)).toMatchObject([{ total: 3 }, { total: 3 }])
+      const keys = pages
+        .flatMap((page) => groupsOf(page.feed))
+        .map((g) => g.groupKey)
+      expect(keys).toHaveLength(2)
+      expect(keys[1]).toBe(keys[0])
     })
 
     it('rejects a cursor issued for another feed', async () => {
@@ -1941,19 +1938,22 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
     }
 
     // What a record stores must not decide how long a cursor is. A folder
-    // DID of 1,990 characters is valid (a DID may have 2,048). The cursor
-    // once carried it twice, so a page whose last item was a capped chunk of
-    // that run had a cursor over the 4,096 characters the response allows and
-    // answered 500 for every client.
-    it('answers every page of a capped run in a folder with a 1,990-character DID, on both procedures and at every page size', async () => {
+    // DID of 1,990 characters is valid (a DID may have 2,048). An earlier
+    // cursor carried it twice, so a page whose last item was a cut group had
+    // a cursor over the 4,096 characters the response allows and answered 500
+    // for every client. The cursor now holds the last consumed row and nothing
+    // else, but the pages of such a folder still have to be served.
+    it('answers every page of a group in a folder with a 1,990-character DID, on both procedures and at every page size', async () => {
       const uploader = randomDid()
       const longDid = `did:web:${'a'.repeat(1_990)}`
       const folder = `at://${longDid}/app.gainforest.ac.deployment/x`
       await fixture.seed([
-        ...Array.from({ length: 450 }, (_, index) =>
+        ...Array.from({ length: 40 }, (_, index) =>
           audio(uploader, `r${pad(index)}`, second(index), folder),
         ),
-        post(randomDid(), 'older', minute(-1_000)),
+        ...Array.from({ length: 3 }, (_, index) =>
+          post(randomDid(), `older${String(index)}`, minute(-1_000 - index)),
+        ),
       ])
 
       for (const procedure of ['getFeed', 'getFeedSkeleton'] as const) {
@@ -1972,18 +1972,13 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       }
 
       const pages = await walk({}, 1)
-      expect(flagsOf(pages.flatMap((page) => page.feed))).toEqual([
-        { type: 'audioItem', total: 200, continued: false, capped: true },
-        { type: 'audioItem', total: 200, continued: true, capped: true },
-        { type: 'audioItem', total: 50, continued: true, capped: false },
-      ])
-      expect(pages[0]?.feed[0]).toMatchObject({ did: longDid })
+      expect(pages[0]?.feed[0]).toMatchObject({ did: longDid, total: 40 })
     })
 
-    it('names only the key and the kind of the run it leaves open', async () => {
+    it('names only the last consumed row', async () => {
       const did = randomDid()
-      await fixture.seed(
-        Array.from({ length: 450 }, (_, index) =>
+      await fixture.seed([
+        ...Array.from({ length: 30 }, (_, index) =>
           audio(
             did,
             `r${pad(index)}`,
@@ -1991,201 +1986,53 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
             `at://${did}/app.gainforest.ac.deployment/f`,
           ),
         ),
-      )
+        post(did, 'older', minute(-1_000)),
+      ])
 
       const page = await service.getFeed(request({ limit: 1 }))
 
-      const decoded = decodeCursor(
-        ACTIVITY_FEED_ID,
-        page.cursor,
-        timestampUriCursor,
+      expect(
+        decodeCursor(ACTIVITY_FEED_ID, page.cursor, timestampUriCursor),
+      ).toEqual({
+        value: expect.stringMatching(
+          /^2026-03-01T00:00:00\.000000Z$/,
+        ) as unknown,
+        uri: `at://${did}/${AUDIO}/r${pad(0)}`,
+      })
+      const payload: unknown = JSON.parse(
+        Buffer.from(page.cursor ?? '', 'base64url').toString('utf8'),
       )
-      expect(Object.keys(decoded?.group ?? {}).sort()).toEqual(['key', 'kind'])
+      expect(payload).toEqual({
+        version: 3,
+        feedId: ACTIVITY_FEED_ID,
+        value: {
+          value: '2026-03-01T00:00:00.000000Z',
+          uri: `at://${did}/${AUDIO}/r${pad(0)}`,
+        },
+      })
     })
 
-    describe.each(['audio', 'observation'] as const)(
-      'a cursor that names an open %s run',
-      (kind) => {
-        const KEY = 'AAAAAAAAAAAAAAAAAAAAAA'
+    it('rejects a cursor that names a group, as a version 3 cursor must not', async () => {
+      const did = randomDid()
+      const cursor = Buffer.from(
+        JSON.stringify({
+          version: 3,
+          feedId: ACTIVITY_FEED_ID,
+          value: {
+            value: minute(1),
+            uri: `at://${did}/${AUDIO}/x`,
+            group: { key: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'audio' },
+          },
+        }),
+      ).toString('base64url')
 
-        /**
-         * Five rows one second apart, newest r4, and an older post. The cursor
-         * row is r3, so the page after it starts with r2, r1, r0. The older
-         * rows can sit in another folder (audio) or belong to another account
-         * (observations), and an audio run can have no folder at all.
-         */
-        const seedRun = async (
-          options: {
-            readonly cursorRow?: Partial<SeedRecord>
-            readonly olderElsewhere?: boolean
-            readonly folderless?: boolean
-          } = {},
-        ) => {
-          const owner = randomDid()
-          const elsewhere = randomDid()
-          const folder = `at://${owner}/app.gainforest.ac.deployment/f`
-          const otherFolder = `at://${elsewhere}/app.gainforest.ac.deployment/g`
-          const rows = Array.from({ length: 5 }, (_, index) => {
-            const older = index < 3 && options.olderElsewhere === true
-            const row =
-              kind === 'audio'
-                ? audio(
-                    owner,
-                    `r${String(index)}`,
-                    second(index),
-                    options.folderless === true
-                      ? undefined
-                      : older
-                        ? otherFolder
-                        : folder,
-                  )
-                : observation(
-                    older ? elsewhere : owner,
-                    `r${String(index)}`,
-                    second(index),
-                  )
-            return { ...row, ...(index === 3 ? options.cursorRow : {}) }
-          })
-          await fixture.seed([
-            ...rows,
-            post(randomDid(), 'older', minute(-1_000)),
-          ])
-          const cursorRow = rows[3]
-          if (cursorRow === undefined) throw new Error('seedRun makes 5 rows')
-          return { owner, cursorRow }
-        }
+      for (const procedure of ['getFeed', 'getFeedSkeleton'] as const) {
+        const { status, body } = await call(procedure, request({ cursor }))
 
-        /**
-         * A cursor a client could make by hand: the payload is written as
-         * JSON, not through the codec, so the group can have any shape.
-         */
-        const cursorFor = (
-          row: SeedRecord,
-          group: unknown,
-          overrides: { sortValue?: string; uri?: string } = {},
-        ): string =>
-          Buffer.from(
-            JSON.stringify({
-              version: 2,
-              feedId: ACTIVITY_FEED_ID,
-              value: {
-                value: overrides.sortValue ?? row.createdAt ?? '',
-                uri: overrides.uri ?? uriOf(row),
-                group,
-              },
-            }),
-          ).toString('base64url')
-
-        const group = { key: KEY, kind }
-
-        /** The first chunk the page after the cursor returns. */
-        const firstChunk = async (cursor: string) =>
-          chunksOf((await service.getFeed(request({ cursor }))).feed)[0]
-
-        it('continues the run when the cursor row is still in it', async () => {
-          const { cursorRow } = await seedRun()
-
-          const chunk = await firstChunk(cursorFor(cursorRow, group))
-
-          expect(chunk).toMatchObject({
-            total: 3,
-            continued: true,
-            capped: false,
-            groupKey: KEY,
-          })
-        })
-
-        it('does not continue it when the next row is of another account or folder, which the database says, not the cursor', async () => {
-          const { cursorRow } = await seedRun({ olderElsewhere: true })
-
-          const chunk = await firstChunk(cursorFor(cursorRow, group))
-
-          expect(chunk).toMatchObject({ total: 3, continued: false })
-          expect(chunk?.groupKey).not.toBe(KEY)
-        })
-
-        it('does not continue it for the other kind', async () => {
-          const { cursorRow } = await seedRun()
-          const other = kind === 'audio' ? 'observation' : 'audio'
-
-          const chunk = await firstChunk(
-            cursorFor(cursorRow, { key: KEY, kind: other }),
-          )
-
-          expect(chunk).toMatchObject({ total: 3, continued: false })
-          expect(chunk?.groupKey).not.toBe(KEY)
-        })
-
-        it('does not continue it when the cursor row is gone', async () => {
-          const { cursorRow } = await seedRun()
-          // The same account and collection, and a key that sorts before r3,
-          // so that the page starts at the same row as with the real cursor.
-          const uri = uriOf({ ...cursorRow, rkey: 'a-gone' })
-
-          const chunk = await firstChunk(cursorFor(cursorRow, group, { uri }))
-
-          expect(chunk).toMatchObject({ total: 3, continued: false })
-          expect(chunk?.groupKey).not.toBe(KEY)
-        })
-
-        it('does not continue it when the cursor row has another timestamp than the cursor says', async () => {
-          const { cursorRow } = await seedRun()
-          // Half a second later than the row: the page starts at the row itself.
-          const sortValue = new Date(BASE + 3_500).toISOString()
-
-          const chunk = await firstChunk(
-            cursorFor(cursorRow, group, { sortValue }),
-          )
-
-          expect(chunk).toMatchObject({ total: 4, continued: false })
-          expect(chunk?.groupKey).not.toBe(KEY)
-        })
-
-        it('does not continue it when the cursor row is not valid', async () => {
-          const { cursorRow } = await seedRun({
-            cursorRow: { validation: 'invalid' },
-          })
-
-          const chunk = await firstChunk(cursorFor(cursorRow, group))
-
-          expect(chunk).toMatchObject({ total: 3, continued: false })
-        })
-
-        // An account's rows of another kind look like the run to a lookup that
-        // does not check the collection: a folderless recording and an
-        // observation of the same account have the same key, for one.
-        it('does not continue it when the cursor row is a record of another kind by the same account', async () => {
-          const { owner } = await seedRun({ folderless: true })
-          // Between r4 and r3: the page starts at r3 and has to say no.
-          const between =
-            kind === 'audio'
-              ? observation(owner, 'between', second(3.5))
-              : post(owner, 'between', second(3.5))
-          await fixture.seed([between])
-
-          const chunk = await firstChunk(cursorFor(between, group))
-
-          expect(chunk).toMatchObject({ total: 4, continued: false })
-          expect(chunk?.groupKey).not.toBe(KEY)
-        })
-
-        it('is rejected when it names an account or a folder, which only the database may say', async () => {
-          const { owner, cursorRow } = await seedRun()
-          const cursor = cursorFor(cursorRow, {
-            ...group,
-            did: owner,
-            folder: `at://${owner}/app.gainforest.ac.deployment/f`,
-          })
-
-          for (const procedure of ['getFeed', 'getFeedSkeleton'] as const) {
-            const { status, body } = await call(procedure, request({ cursor }))
-
-            expect(status, procedure).toBe(400)
-            expect(body, procedure).toMatchObject({ error: 'InvalidCursor' })
-          }
-        })
-      },
-    )
+        expect(status, procedure).toBe(400)
+        expect(body, procedure).toMatchObject({ error: 'InvalidCursor' })
+      }
+    })
 
     // PostgreSQL rejects these timestamps although they look like RFC 3339
     // datetimes, and the statement used to answer 500.
@@ -2277,31 +2124,28 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       expect(skeleton.cursor).toBe(full.cursor)
     })
 
-    it('flattens the chunks of a long run into their samples and shares the cursor', async () => {
+    it('lists every row of a group, not only its samples, and shares the cursor', async () => {
       const did = randomDid()
       await fixture.seed([
-        ...Array.from({ length: 450 }, (_, index) =>
+        ...Array.from({ length: 45 }, (_, index) =>
           observation(did, `o${String(index).padStart(3, '0')}`, second(index)),
         ),
         post(randomDid(), 'older', minute(-1_000)),
       ])
 
-      const full = await service.getFeed(request({ limit: 2 }))
-      const skeleton = await service.getFeedSkeleton(request({ limit: 2 }))
+      const full = await service.getFeed(request({ limit: 1 }))
+      const skeleton = await service.getFeedSkeleton(request({ limit: 1 }))
 
+      expect(full.feed[0]).toMatchObject({ total: 45 })
+      expect(groupsOf(full.feed)[0]?.subjects).toHaveLength(20)
       expect(skeleton.cursor).toBeDefined()
       expect(skeleton.cursor).toBe(full.cursor)
-      // Two chunks of 200 rows contribute their 20 newest rows each.
-      expect(skeleton.feed.map(({ subject }) => rkeyOf(subject))).toEqual([
-        ...Array.from(
-          { length: 20 },
-          (_, index) => `o${String(449 - index).padStart(3, '0')}`,
+      expect(skeleton.feed.map(({ subject }) => rkeyOf(subject))).toEqual(
+        Array.from(
+          { length: 45 },
+          (_, index) => `o${String(44 - index).padStart(3, '0')}`,
         ),
-        ...Array.from(
-          { length: 20 },
-          (_, index) => `o${String(249 - index).padStart(3, '0')}`,
-        ),
-      ])
+      )
     })
 
     it('shares its cursor with getFeed', async () => {
@@ -2362,7 +2206,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
     /**
      * Dense data with 12-hour boundaries and UTC-midnight crossings. With
      * `ties`, about a third of the rows share the previous row's exact
-     * timestamp, across kinds and inside one account's burst.
+     * timestamp, across kinds and inside one account's group.
      */
     const randomDataset = (seed: number, ties: boolean): SeedRecord[] => {
       const next = random(seed)
@@ -2390,7 +2234,7 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
         } else if (roll < 0.9) {
           clock += (ties ? 0 : 1) + Math.floor(next() * 20 * 60_000)
         } else if (roll < 0.94) {
-          clock += 12 * 3_600_000 // exactly 12 hours: still one burst
+          clock += 12 * 3_600_000 // exactly 12 hours: still one group
         } else if (roll < 0.97) {
           clock += 12 * 3_600_000 + 1 // 12 hours and a millisecond: split
         } else {
@@ -2399,12 +2243,42 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
         return new Date(clock).toISOString()
       }
 
+      /**
+       * A session: a few rows of one group close together, a gap of exactly 12
+       * hours, of 12 hours and a millisecond, or of 14 hours, and a few more
+       * rows of the same group. It is the group the gap rule joins or splits.
+       */
+      const session = (): void => {
+        const did = pick(dids)
+        const recordings = next() < 0.5
+        const folder = pick(folders)
+        const gap = pick([12 * 3_600_000, 12 * 3_600_000 + 1, 14 * 3_600_000])
+        const rows = (count: number): void => {
+          for (let index = 0; index < count; index += 1) {
+            clock += ties ? 0 : 1 + Math.floor(next() * 60_000)
+            const createdAt = new Date(clock).toISOString()
+            records.push(
+              recordings
+                ? audio(did, key(), createdAt, folder)
+                : observation(did, key(), createdAt),
+            )
+          }
+        }
+        rows(3 + Math.floor(next() * 3))
+        clock += gap
+        rows(3 + Math.floor(next() * 3))
+      }
+
       // Rows often repeat the previous row's account and kind, so the data has
-      // runs long enough to be cut by a small cap.
+      // streaks long enough to make groups.
       let lastDid = pick(dids)
       let lastRoll = next()
       let lastFolder = pick(folders)
       for (let step = 0; step < 260; step += 1) {
+        if (next() < 0.04) {
+          session()
+          continue
+        }
         const sticky = next() < 0.6
         const did = sticky ? lastDid : pick(dids)
         const roll = sticky ? lastRoll : next()
@@ -2481,133 +2355,219 @@ describe('GainForest activity feed against Hyperindex Postgres', () => {
       return records
     }
 
-    /** Pages the feed to the end and compares it with the model. */
+    /**
+     * Pages the feed to the end and compares every page with the model: its
+     * items, whether it has a cursor, the statements the request sent, and the
+     * skeleton of the same page.
+     */
     const expectModelFeed = async (
       records: readonly SeedRecord[],
-      reader: FeedService,
-      maxGroupRows: number | undefined,
-      scope?: { readonly viewer: string; readonly followed: Set<string> },
+      sizes: ActivityFeedOptions,
     ): Promise<void> => {
       const uriRank = await fixture.uriOrder(records.map(uriOf))
-      const filters = scope
-        ? ['all', 'observation', 'audio']
-        : ['all', 'project', 'observation', 'organization', 'post', 'audio']
+      const counted = countingService(sizes)
+      const filters = [
+        'all',
+        'project',
+        'observation',
+        'organization',
+        'post',
+        'audio',
+      ]
       for (const filter of filters) {
-        const expected = modelFeed(records, {
-          filter,
-          uriRank,
-          ...(maxGroupRows === undefined ? {} : { maxGroupRows }),
-          ...(scope === undefined ? {} : { followed: scope.followed }),
-        })
-        for (const limit of [1, 2, 3, 7, 20, 50]) {
-          const actual = modelOf(
-            await allItems(
-              {
-                filter,
-                ...(scope === undefined
-                  ? {}
-                  : { following: true, viewerDid: scope.viewer }),
-              },
+        for (const limit of [1, 3, 7, 20, 50]) {
+          const expected = modelPages(records, {
+            filter,
+            limit,
+            uriRank,
+            ...sizes,
+          })
+          let cursor: string | undefined
+          for (const [index, page] of expected.entries()) {
+            const where = `filter ${filter}, limit ${String(limit)}, page ${String(index + 1)}`
+            const input = request({
+              filter,
               limit,
-              reader,
-            ),
-          )
-          expect(actual, `filter ${filter}, limit ${String(limit)}`).toEqual(
-            expected,
+              ...(cursor === undefined ? {} : { cursor }),
+            })
+
+            counted.reset()
+            const actual = await counted.service.getFeed(input)
+
+            expect(modelOf(actual.feed), where).toEqual(page.items)
+            expect(actual.cursor !== undefined, `${where}: cursor`).toBe(
+              page.hasNext,
+            )
+            expect(counted.statements(), `${where}: statements`).toBe(
+              page.statements,
+            )
+            const skeleton = await counted.service.getFeedSkeleton(input)
+            expect(
+              skeleton.feed.map(({ subject }) => subject),
+              `${where}: skeleton`,
+            ).toEqual(page.uris)
+            expect(skeleton.cursor, `${where}: skeleton cursor`).toBe(
+              actual.cursor,
+            )
+            cursor = actual.cursor
+          }
+          expect(cursor, `filter ${filter}, limit ${String(limit)}: end`).toBe(
+            undefined,
           )
         }
       }
     }
 
-    it('has runs long enough for the small caps to cut, so the comparisons cover continued and capped chunks', () => {
-      const chunks = modelFeed(randomDataset(1, true), {
+    it('has data rich enough for the comparisons to cover groups, small groups shown as records, groups split by a gap, budget stops, and pages over the limit', () => {
+      const records = randomDataset(1, true)
+      const small = modelPages(records, {
         filter: 'all',
-        maxGroupRows: 3,
-      }).filter((item) => item.type === 'burst' || item.type === 'audio')
+        limit: 3,
+        batchRows: 3,
+        requestRows: 13,
+      })
+      const wide = modelPages(records, {
+        filter: 'all',
+        limit: 20,
+        batchRows: 7,
+        requestRows: 40,
+      })
+      const items = small.flatMap((page) => page.items)
+      const groups = items.filter((item) => item.type === 'group')
 
-      for (const type of ['burst', 'audio']) {
-        const ofType = chunks.filter((item) => item.type === type)
-        expect(
-          ofType.some((item) => item.continued),
-          type,
-        ).toBe(true)
-        expect(
-          ofType.some((item) => item.capped),
-          type,
-        ).toBe(true)
-      }
+      expect(groups.map((group) => group.kind)).toContain('observation')
+      expect(groups.map((group) => group.kind)).toContain('audio')
+      expect(
+        items.some((item) => item.type === 'record' && item.kind === 'audio'),
+      ).toBe(true)
+      expect(
+        items.some(
+          (item) => item.type === 'record' && item.kind === 'observation',
+        ),
+      ).toBe(true)
+      expect(groups.some((group) => group.more)).toBe(true)
+      expect(small.some((page) => page.items.length > 3)).toBe(true)
+      // Two cards of one group on one page: a gap of more than 12 hours.
+      expect(
+        wide.some((page) => {
+          const groups = page.items.flatMap((item) =>
+            item.type === 'group' ? [item.groupIndex] : [],
+          )
+          return new Set(groups).size < groups.length
+        }),
+      ).toBe(true)
     })
+
+    it('lists every selectable row exactly once across a full walk, at several limits and budgets', async () => {
+      const records = randomDataset(5, false)
+      await fixture.seed(records)
+      const uriRank = await fixture.uriOrder(records.map(uriOf))
+      const everything = modelRowUris(records, {
+        filter: 'all',
+        uriRank,
+      }).sort()
+      expect(everything.length).toBeGreaterThan(100)
+
+      for (const sizes of [
+        {},
+        { batchRows: 7, requestRows: 25 },
+        { batchRows: 1, requestRows: 4 },
+      ] satisfies ActivityFeedOptions[]) {
+        const reader = serviceFor(sizes)
+        for (const limit of [1, 3, 20, 50]) {
+          const context = `${JSON.stringify(sizes)}, limit ${String(limit)}`
+          const uris: string[] = []
+          let cursor: string | undefined
+          do {
+            const page = await reader.getFeedSkeleton(
+              request({
+                limit,
+                ...(cursor === undefined ? {} : { cursor }),
+              }),
+            )
+            uris.push(...page.feed.map(({ subject }) => subject))
+            cursor = page.cursor
+          } while (cursor !== undefined)
+          expect([...uris].sort(), context).toEqual(everything)
+
+          // The cards add up to the same rows: a group counts its total.
+          const items = await allItems({}, limit, reader)
+          expect(
+            items.reduce(
+              (sum, item) =>
+                sum +
+                (item.$type === 'app.gainforest.feed.defs#groupItem'
+                  ? item.total
+                  : 1),
+              0,
+            ),
+            context,
+          ).toBe(everything.length)
+        }
+      }
+    }, 180_000)
 
     const configurations = [
       {
-        name: 'production cap, unique timestamps',
+        name: 'production sizes, unique timestamps',
         ties: false,
-        cap: undefined,
+        sizes: {},
         seeds: [1, 2, 3, 4],
       },
       {
-        name: 'production cap, tied timestamps',
+        name: 'production sizes, tied timestamps',
         ties: true,
-        cap: undefined,
+        sizes: {},
         seeds: [1, 2],
       },
       {
-        name: 'cap of 2 rows, unique timestamps',
+        name: 'batches of 7 rows and a budget of 40, unique timestamps',
         ties: false,
-        cap: 2,
+        sizes: { batchRows: 7, requestRows: 40 },
         seeds: [1, 2, 3],
       },
       {
-        name: 'cap of 3 rows, tied timestamps',
+        name: 'batches of 3 rows and a budget of 13, tied timestamps',
         ties: true,
-        cap: 3,
+        sizes: { batchRows: 3, requestRows: 13 },
         seeds: [1, 2, 3],
       },
       {
-        name: 'cap of 5 rows, unique timestamps',
+        name: 'one-row batches and a budget of 9, unique timestamps',
         ties: false,
-        cap: 5,
+        sizes: { batchRows: 1, requestRows: 9 },
         seeds: [1, 2],
       },
       {
-        name: 'cap of 4 rows, tied timestamps',
+        name: 'a budget that is not a multiple of the batch, tied timestamps',
         ties: true,
-        cap: 4,
+        sizes: { batchRows: 4, requestRows: 10 },
+        seeds: [1, 2],
+      },
+      {
+        name: 'a budget of one batch, unique timestamps',
+        ties: false,
+        sizes: { batchRows: 5, requestRows: 5 },
         seeds: [1],
       },
-    ] as const
+    ] as const satisfies readonly {
+      name: string
+      ties: boolean
+      sizes: ActivityFeedOptions
+      seeds: readonly number[]
+    }[]
 
     describe.each(configurations)('$name', (configuration) => {
-      const reader = (): FeedService =>
-        configuration.cap === undefined
-          ? service
-          : serviceFor(configuration.cap)
-
       it.each(configuration.seeds)(
         'pages random dataset %i exactly like the model for every filter and page size',
         async (seed) => {
           const records = randomDataset(seed, configuration.ties)
           await fixture.seed(records)
 
-          await expectModelFeed(records, reader(), configuration.cap)
+          await expectModelFeed(records, configuration.sizes)
         },
         180_000,
       )
-
-      it('scopes a random dataset to followed accounts exactly like the model', async () => {
-        const records = randomDataset(11, configuration.ties)
-        const viewer = randomDid()
-        const followed = new Set([dids[0], dids[2]])
-        await fixture.seed([
-          ...records,
-          ...[...followed].map((did) => follow(viewer, did)),
-        ])
-
-        await expectModelFeed(records, reader(), configuration.cap, {
-          viewer,
-          followed,
-        })
-      }, 180_000)
     })
   })
 })
@@ -2649,9 +2609,9 @@ describe('Database readiness against Hyperindex Postgres', () => {
     ).rejects.toThrow(/read-only/i)
   })
 
-  // The feed statement is a 10 ms query whose estimated cost grows with the
-  // table: above `jit_above_cost` PostgreSQL would compile it and add
-  // 100 to 150 ms to every page. The pool has to get the setting to the server.
+  // The feed statement runs in a few milliseconds and its estimated cost grows
+  // with the table: above `jit_above_cost` PostgreSQL would compile it and add
+  // 100 to 150 ms to every batch. The pool has to get the setting to the server.
   it('opens every session with JIT off', async () => {
     const { rows } = await database.query<{ jit: string; read_only: string }>(
       `SELECT current_setting('jit') AS jit,

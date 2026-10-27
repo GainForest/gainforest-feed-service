@@ -2,29 +2,38 @@ import { describe, expect, it } from 'vitest'
 
 import { decodeCursor, timestampUriCursor } from '../src/feed/cursor.js'
 import { FeedError } from '../src/feed/errors.js'
-import { createActivityFeed } from '../src/feed/query.js'
+import {
+  BATCH_ROWS,
+  REQUEST_ROWS,
+  createActivityFeed,
+} from '../src/feed/query.js'
 import type { ActivityFeedQueryRow } from '../src/feed/query.js'
 import type { SqlFeedQueryExecutor } from '../src/feed/sql-feed.js'
 import { $output } from '../src/lexicons/app/gainforest/feed/getFeed.js'
 import {
   ACTIVITY_FEED_ID,
   ACTIVITY_FEED_PARAMS_TYPE,
-  AUDIO_ITEM_TYPE,
-  BURST_ITEM_TYPE,
-  MAX_GROUP_ROWS,
+  GROUP_ITEM_TYPE,
   RECORD_ITEM_TYPE,
   REPOST_ITEM_TYPE,
-  type ActivityFeedItem,
 } from '../src/feed/types.js'
 import { Metrics } from '../src/metrics.js'
 
-const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
+const uploaderDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const authorDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
 const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
 const at = (collection: string, rkey: string): string =>
   `at://${authorDid}/${collection}/${rkey}`
 const folder = at('app.gainforest.ac.deployment', 'folder')
 const GROUP_KEY = /^[A-Za-z0-9_-]{22}$/
+const ALL_KINDS = [
+  'project',
+  'observation',
+  'organization',
+  'post',
+  'repost',
+  'audio',
+]
 
 class FakeQueryExecutor implements SqlFeedQueryExecutor<ActivityFeedQueryRow> {
   readonly calls: {
@@ -53,57 +62,54 @@ class FakeQueryExecutor implements SqlFeedQueryExecutor<ActivityFeedQueryRow> {
   }
 }
 
-const itemRow = (
-  overrides: Partial<ActivityFeedQueryRow>,
+/** The time of the row `index` seconds after 2026-07-21T10:00:00Z, as the statement formats it. */
+const timeOf = (index: number): string =>
+  new Date(Date.parse('2026-07-21T10:00:00Z') + index * 1_000)
+    .toISOString()
+    .replace('Z', '000Z')
+
+/** A post row; a larger `index` is newer. */
+const postRow = (
+  index: number,
+  overrides: Partial<ActivityFeedQueryRow> = {},
 ): ActivityFeedQueryRow => ({
-  item_no: 1,
   kind: 'post',
-  uri: at('app.gainforest.feed.post', 'p1'),
+  uri: at('app.gainforest.feed.post', `p${String(index)}`),
   cid,
   did: authorDid,
-  sort_value: '2026-07-21T10:00:05.000000Z',
+  sort_value: timeOf(index),
+  owner: null,
+  folder: null,
+  bioacoustic: false,
   subject: null,
-  deployment: null,
-  total: 1,
-  tail_sort_value: '2026-07-21T10:00:05.000000Z',
-  tail_uri: at('app.gainforest.feed.post', 'p1'),
-  samples: [at('app.gainforest.feed.post', 'p1')],
-  continued: false,
-  capped: false,
   ...overrides,
 })
 
-/** The row of an item after the page: it carries no group details. */
-const sentinelRow = (
-  overrides: Partial<ActivityFeedQueryRow>,
-): ActivityFeedQueryRow =>
-  itemRow({
-    total: null,
-    tail_sort_value: null,
-    tail_uri: null,
-    samples: null,
-    ...overrides,
-  })
-
-/** A chunk of an audio run: `index` is its position in the run, newest first. */
-const audioChunk = (
+const recordingRow = (
   index: number,
   overrides: Partial<ActivityFeedQueryRow> = {},
 ): ActivityFeedQueryRow =>
-  itemRow({
-    item_no: index + 1,
+  postRow(index, {
     kind: 'audio',
-    uri: at('app.gainforest.ac.audio', `head${String(index)}`),
-    deployment: folder,
-    total: MAX_GROUP_ROWS,
-    sort_value: `2026-07-21T10:00:0${String(9 - index)}.000000Z`,
-    tail_sort_value: `2026-07-21T09:00:0${String(9 - index)}.000000Z`,
-    tail_uri: at('app.gainforest.ac.audio', `tail${String(index)}`),
-    samples: [at('app.gainforest.ac.audio', `head${String(index)}`)],
-    continued: index > 0,
-    capped: true,
+    uri: at('app.gainforest.ac.audio', `a${String(index)}`),
+    owner: authorDid,
+    folder,
     ...overrides,
   })
+
+const observationRow = (
+  index: number,
+  overrides: Partial<ActivityFeedQueryRow> = {},
+): ActivityFeedQueryRow =>
+  postRow(index, {
+    kind: 'observation',
+    uri: at('app.gainforest.dwc.occurrence', `o${String(index)}`),
+    ...overrides,
+  })
+
+/** Rows newest first: `count` posts, numbered from `newest` down. */
+const posts = (newest: number, count: number): ActivityFeedQueryRow[] =>
+  Array.from({ length: count }, (_, offset) => postRow(newest - offset))
 
 const createFeed = (
   database: FakeQueryExecutor,
@@ -115,108 +121,105 @@ const params = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-const encodedCursor = (value: Record<string, unknown>): string =>
+const encodedCursor = (value: Record<string, unknown>, version = 3): string =>
   Buffer.from(
-    JSON.stringify({ version: 2, feedId: ACTIVITY_FEED_ID, value }),
+    JSON.stringify({ version, feedId: ACTIVITY_FEED_ID, value }),
   ).toString('base64url')
 
-const groupKeyOf = (item: ActivityFeedItem | undefined): unknown =>
-  item !== undefined && 'groupKey' in item ? item.groupKey : undefined
+const cursorOf = (cursor: string | undefined) =>
+  decodeCursor(ACTIVITY_FEED_ID, cursor, timestampUriCursor)
 
 describe('activity feed SQL definition', () => {
-  it('binds the statement contract for the unscoped feed', async () => {
+  it('binds the statement contract for the feed of every kind', async () => {
     const database = new FakeQueryExecutor([[]])
     const feed = createFeed(database)
 
     await expect(feed.loadPage(params(), { limit: 2 })).resolves.toEqual({
       items: [],
+      uris: [],
     })
 
     expect(feed.id).toBe(ACTIVITY_FEED_ID)
     expect(feed.paramsType).toBe(ACTIVITY_FEED_PARAMS_TYPE)
     expect(database.calls).toHaveLength(1)
     expect(database.calls[0]?.values).toEqual([
-      ['project', 'observation', 'organization', 'post', 'repost', 'audio'],
-      false,
+      ALL_KINDS,
       null,
       null,
-      null,
-      3,
-      401,
-      43_200,
-      20,
-      200,
-      null,
+      BATCH_ROWS,
     ])
   })
 
-  it('binds a single kind, the viewer scope, the cursor, and the kind of the run it left open', async () => {
+  it('binds a single kind and the cursor position', async () => {
     const database = new FakeQueryExecutor([[]])
-    const feed = createFeed(database)
     const position = {
       value: '2026-07-21T10:00:00.000000Z',
       uri: at('app.gainforest.ac.audio', 'o1'),
-      group: { key: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'audio' },
     }
 
-    await feed.loadPage(
-      params({ filter: 'audio', following: true, viewerDid }),
-      { limit: 10, cursor: encodedCursor(position) },
-    )
-
-    expect(database.calls[0]?.values).toEqual([
-      ['audio'],
-      true,
-      viewerDid,
-      position.value,
-      position.uri,
-      11,
-      2_001,
-      43_200,
-      20,
-      200,
-      'audio',
-    ])
-  })
-
-  it('binds no open run for a cursor that left none', async () => {
-    const database = new FakeQueryExecutor([[]])
-    const position = {
-      value: '2026-07-21T10:00:00.000000Z',
-      uri: at('app.gainforest.dwc.occurrence', 'o1'),
-    }
-
-    await createFeed(database).loadPage(params(), {
+    await createFeed(database).loadPage(params({ filter: 'audio' }), {
+      limit: 10,
       cursor: encodedCursor(position),
     })
 
-    expect(database.calls[0]?.values.slice(10)).toEqual([null])
+    expect(database.calls[0]?.values).toEqual([
+      ['audio'],
+      position.value,
+      position.uri,
+      BATCH_ROWS,
+    ])
   })
 
-  it.each([
-    [1, 201],
-    [20, 4_001],
-    [50, 10_001],
-  ])(
-    'reads limit × 200 + 1 rows for a page of %i items',
-    async (limit, scanRows) => {
-      const database = new FakeQueryExecutor([[]])
-
-      await createFeed(database).loadPage(params(), { limit })
-
-      expect(database.calls[0]?.values[6]).toBe(scanRows)
-    },
-  )
-
-  it('sizes the scan and the chunks from the configured cap', async () => {
+  it('applies the default filter when a request omits params', async () => {
     const database = new FakeQueryExecutor([[]])
+    const feed = createFeed(database)
 
-    await createFeed(database, { maxGroupRows: 7 }).loadPage(params(), {
-      limit: 3,
+    expect(feed.defaultParams).toEqual({ $type: ACTIVITY_FEED_PARAMS_TYPE })
+    await expect(feed.loadPage(undefined, {})).resolves.toEqual({
+      items: [],
+      uris: [],
     })
 
-    expect(database.calls[0]?.values[6]).toBe(22)
-    expect(database.calls[0]?.values[9]).toBe(7)
+    expect(database.calls[0]?.values).toEqual([
+      ALL_KINDS,
+      null,
+      null,
+      BATCH_ROWS,
+    ])
+  })
+
+  // The Lexicon object is open and the feed reads only `filter`, so any other
+  // property a caller sends is dropped, whatever its value.
+  it.each([
+    [
+      'following with a viewer',
+      { following: true, viewerDid: 'did:plc:ar7c4by46qjdydhdevvrndac' },
+    ],
+    ['a malformed following', { following: 'yes' }],
+    ['a malformed viewer', { viewerDid: 'not-a-did' }],
+    ['an unknown property', { somethingElse: ['x'] }],
+  ])('ignores %s and answers as without it', async (_name, extra) => {
+    const withExtra = new FakeQueryExecutor([[postRow(1)]])
+    const without = new FakeQueryExecutor([[postRow(1)]])
+
+    const page = await createFeed(withExtra).loadPage(
+      params({ filter: 'post', ...extra }),
+      {},
+    )
+    const expected = await createFeed(without).loadPage(
+      params({ filter: 'post' }),
+      {},
+    )
+
+    expect(page).toEqual(expected)
+    expect(page.items).toHaveLength(1)
+    expect(withExtra.calls[0]?.values).toEqual(without.calls[0]?.values)
+    expect(withExtra.calls[0]?.values).toEqual([
+      ['post'],
+      null,
+      null,
+      BATCH_ROWS,
+    ])
   })
 
   it('rejects invalid params before querying', async () => {
@@ -227,528 +230,522 @@ describe('activity feed SQL definition', () => {
       feed.loadPage(params({ filter: 'donation' }), {}),
     ).rejects.toMatchObject({ code: 'InvalidRequest' })
     await expect(
-      feed.loadPage(params({ viewerDid: 'not-a-did', following: true }), {}),
-    ).rejects.toMatchObject({ code: 'InvalidRequest' })
-    await expect(
-      feed.loadPage(params({ following: true }), {}),
-    ).rejects.toMatchObject({ code: 'InvalidRequest' })
-    await expect(
-      feed.loadPage(params({ following: 'yes' }), {}),
-    ).rejects.toMatchObject({ code: 'InvalidRequest' })
+      feed.loadPage(params({ filter: 7 }), {}),
+    ).rejects.toMatchObject({ code: 'InvalidRequest', status: 400 })
     expect(database.calls).toEqual([])
   })
 
-  it('maps every item shape and trims the sentinel without mapping it', async () => {
-    const burstTail = at('app.gainforest.dwc.occurrence', 'o1')
-    const database = new FakeQueryExecutor([
-      [
-        itemRow({
-          item_no: 1,
+  it('uses a batch of 500 rows and a budget of 5,000, which is ten statements', () => {
+    expect(BATCH_ROWS).toBe(500)
+    expect(REQUEST_ROWS).toBe(5_000)
+    expect(REQUEST_ROWS / BATCH_ROWS).toBe(10)
+  })
+
+  describe('items', () => {
+    it('maps every row shape and folds the rows of a group into one card', async () => {
+      const groupTail = at('app.gainforest.dwc.occurrence', 'o1')
+      const database = new FakeQueryExecutor([
+        [
+          postRow(12, {
+            kind: 'project',
+            uri: at('org.hypercerts.collection', 'c1'),
+          }),
+          postRow(11, {
+            kind: 'repost',
+            uri: at('app.gainforest.feed.repost', 'r1'),
+            subject: at('app.gainforest.feed.post', 'subject'),
+          }),
+          observationRow(10),
+          recordingRow(9, { did: uploaderDid }),
+          observationRow(8),
+          observationRow(7),
+          observationRow(1),
+          postRow(0, {
+            kind: 'organization',
+            uri: at('x.example.org', 'self'),
+          }),
+        ],
+      ])
+
+      const page = await createFeed(database).loadPage(params(), { limit: 10 })
+
+      expect(page.items).toEqual([
+        {
+          $type: RECORD_ITEM_TYPE,
           kind: 'project',
           uri: at('org.hypercerts.collection', 'c1'),
-          sort_value: '2026-07-21T10:00:09.000000Z',
-        }),
-        itemRow({
-          item_no: 2,
-          kind: 'repost',
+          cid,
+          did: authorDid,
+          createdAt: '2026-07-21T10:00:12.000000Z',
+        },
+        {
+          $type: REPOST_ITEM_TYPE,
           uri: at('app.gainforest.feed.repost', 'r1'),
+          cid,
+          did: authorDid,
+          createdAt: '2026-07-21T10:00:11.000000Z',
           subject: at('app.gainforest.feed.post', 'subject'),
-          sort_value: '2026-07-21T10:00:08.000000Z',
-        }),
-        itemRow({
-          item_no: 3,
+        },
+        {
+          $type: GROUP_ITEM_TYPE,
           kind: 'observation',
-          uri: at('app.gainforest.dwc.occurrence', 'o9'),
-          sort_value: '2026-07-21T10:00:07.000000Z',
-          total: 1,
-        }),
-        itemRow({
-          item_no: 4,
-          kind: 'observation',
-          uri: at('app.gainforest.dwc.occurrence', 'o8'),
-          sort_value: '2026-07-21T10:00:06.000000Z',
-          total: 150,
-          tail_sort_value: '2026-07-21T09:00:00.000000Z',
-          tail_uri: burstTail,
-          samples: [at('app.gainforest.dwc.occurrence', 'o8'), burstTail],
-        }),
-        itemRow({
-          item_no: 5,
+          did: authorDid,
+          groupKey: expect.stringMatching(GROUP_KEY) as unknown,
+          total: 4,
+          from: '2026-07-21T10:00:01.000000Z',
+          to: '2026-07-21T10:00:10.000000Z',
+          subjects: [
+            at('app.gainforest.dwc.occurrence', 'o10'),
+            at('app.gainforest.dwc.occurrence', 'o8'),
+            at('app.gainforest.dwc.occurrence', 'o7'),
+            groupTail,
+          ],
+        },
+        {
+          $type: RECORD_ITEM_TYPE,
           kind: 'audio',
           uri: at('app.gainforest.ac.audio', 'a9'),
-          sort_value: '2026-07-20T23:00:00.000000Z',
-          deployment: folder,
-          total: 90,
-          tail_sort_value: '2026-07-20T22:00:00.000000Z',
-          tail_uri: at('app.gainforest.ac.audio', 'a1'),
-          samples: [at('app.gainforest.ac.audio', 'a9')],
-        }),
-        // The sentinel only proves that another page exists. Its group
-        // details are never computed, so it must not be mapped.
-        sentinelRow({
-          item_no: 6,
-          kind: 'audio',
-          uri: at('app.gainforest.ac.audio', 'a0'),
-        }),
-      ],
-    ])
-    const feed = createFeed(database)
-
-    const page = await feed.loadPage(params(), { limit: 5 })
-
-    expect(page.items).toEqual([
-      {
-        $type: RECORD_ITEM_TYPE,
-        kind: 'project',
-        uri: at('org.hypercerts.collection', 'c1'),
-        cid,
-        did: authorDid,
-        createdAt: '2026-07-21T10:00:09.000000Z',
-      },
-      {
-        $type: REPOST_ITEM_TYPE,
-        uri: at('app.gainforest.feed.repost', 'r1'),
-        cid,
-        did: authorDid,
-        createdAt: '2026-07-21T10:00:08.000000Z',
-        subject: at('app.gainforest.feed.post', 'subject'),
-      },
-      {
-        $type: RECORD_ITEM_TYPE,
-        kind: 'observation',
-        uri: at('app.gainforest.dwc.occurrence', 'o9'),
-        cid,
-        did: authorDid,
-        createdAt: '2026-07-21T10:00:07.000000Z',
-      },
-      {
-        $type: BURST_ITEM_TYPE,
-        did: authorDid,
-        total: 150,
-        from: '2026-07-21T09:00:00.000000Z',
-        to: '2026-07-21T10:00:06.000000Z',
-        subjects: [at('app.gainforest.dwc.occurrence', 'o8'), burstTail],
-        groupKey: expect.stringMatching(GROUP_KEY) as unknown,
-        continued: false,
-        capped: false,
-      },
-      {
-        $type: AUDIO_ITEM_TYPE,
-        did: authorDid,
-        deployment: folder,
-        total: 90,
-        from: '2026-07-20T22:00:00.000000Z',
-        to: '2026-07-20T23:00:00.000000Z',
-        subjects: [at('app.gainforest.ac.audio', 'a9')],
-        groupKey: expect.stringMatching(GROUP_KEY) as unknown,
-        continued: false,
-        capped: false,
-      },
-    ])
-    expect(
-      decodeCursor(ACTIVITY_FEED_ID, page.cursor, timestampUriCursor),
-    ).toEqual({
-      value: '2026-07-20T22:00:00.000000Z',
-      uri: at('app.gainforest.ac.audio', 'a1'),
-    })
-  })
-
-  it('omits the cid Hyperindex has not stored', async () => {
-    const database = new FakeQueryExecutor([
-      [
-        itemRow({ item_no: 1, cid: null }),
-        itemRow({
-          item_no: 2,
-          kind: 'repost',
-          uri: at('app.gainforest.feed.repost', 'r1'),
-          subject: at('app.gainforest.feed.post', 'subject'),
-          cid: null,
-        }),
-      ],
-    ])
-
-    const page = await createFeed(database).loadPage(params(), {})
-
-    expect(page.items).toHaveLength(2)
-    for (const item of page.items) expect(item).not.toHaveProperty('cid')
-  })
-
-  it('omits the optional deployment for an audio item without a folder', async () => {
-    const database = new FakeQueryExecutor([
-      [audioChunk(0, { deployment: null, capped: false, total: 2 })],
-    ])
-
-    const page = await createFeed(database).loadPage(params(), {})
-
-    expect(page.items[0]).not.toHaveProperty('deployment')
-  })
-
-  // `deployment` has `format: at-uri` and the output check is strict. One
-  // folder that fails it would answer 500 on every page that holds the
-  // recording, so the item names a folder only when it passes. The expected
-  // column is written out, not computed, so the table pins the rule.
-  describe('the folder of an audio item', () => {
-    it.each([
-      ['the AT-URI of a folder', folder, true],
-      ['a DID alone', `at://${authorDid}`, true],
-      [
-        'a handle with a collection and a key',
-        'at://recorders.example/app.gainforest.ac.deployment/f',
-        true,
-      ],
-      ['an authority that is not a DID or a handle', 'at://did:/x', false],
-      [
-        'a path that is not a collection and a key',
-        `at://${authorDid}/x`,
-        false,
-      ],
-      ['a trailing slash', `${folder}/`, false],
-      ['a query', `${folder}?x=1`, false],
-      ['a fragment', `${folder}#frag`, false],
-      ['a space', `${folder} f`, false],
-      ['nothing after the scheme', 'at://', false],
-      [
-        'a DID over 2,048 characters',
-        `at://did:web:${'a'.repeat(2_100)}/app.gainforest.ac.deployment/f`,
-        false,
-      ],
-    ])(
-      'names %s only when it is a valid AT-URI',
-      async (_name, deployment, named) => {
-        const database = new FakeQueryExecutor([
-          [audioChunk(0, { deployment, capped: false, total: 2 })],
-        ])
-
-        const page = await createFeed(database).loadPage(params(), {})
-
-        const [item] = page.items
-        expect(item).toMatchObject({
-          $type: AUDIO_ITEM_TYPE,
+          cid,
+          did: uploaderDid,
+          createdAt: '2026-07-21T10:00:09.000000Z',
+        },
+        {
+          $type: RECORD_ITEM_TYPE,
+          kind: 'organization',
+          uri: at('x.example.org', 'self'),
+          cid,
           did: authorDid,
-          total: 2,
-          groupKey: expect.stringMatching(GROUP_KEY) as unknown,
-        })
-        expect(item !== undefined && 'deployment' in item).toBe(named)
-        // Whatever a record stores, the page passes the output check.
-        expect(() => $output.schema.$parse({ feed: page.items })).not.toThrow()
-      },
-    )
-  })
+          createdAt: '2026-07-21T10:00:00.000000Z',
+        },
+      ])
+      expect(() => $output.schema.$parse({ feed: page.items })).not.toThrow()
+      expect(page.uris).toEqual([
+        at('org.hypercerts.collection', 'c1'),
+        at('app.gainforest.feed.repost', 'r1'),
+        at('app.gainforest.dwc.occurrence', 'o10'),
+        at('app.gainforest.dwc.occurrence', 'o8'),
+        at('app.gainforest.dwc.occurrence', 'o7'),
+        groupTail,
+        at('app.gainforest.ac.audio', 'a9'),
+        at('x.example.org', 'self'),
+      ])
+      expect(page.cursor).toBeUndefined()
+    })
 
-  it('returns an empty page when the statement finds no item', async () => {
-    const page = await createFeed(new FakeQueryExecutor([[]])).loadPage(
-      params(),
-      {},
-    )
-
-    expect(page).toEqual({ items: [] })
-  })
-
-  it('moves the cursor past the whole burst, to its oldest member', async () => {
-    const oldest = at('app.gainforest.dwc.occurrence', 'oldest')
-    const database = new FakeQueryExecutor([
-      [
-        itemRow({
-          item_no: 1,
-          kind: 'observation',
-          uri: at('app.gainforest.dwc.occurrence', 'newest'),
-          total: 40,
-          tail_sort_value: '2026-07-21T08:00:00.000000Z',
-          tail_uri: oldest,
-        }),
-        sentinelRow({ item_no: 2 }),
-      ],
-    ])
-
-    const page = await createFeed(database).loadPage(params(), { limit: 1 })
-
-    expect(
-      decodeCursor(ACTIVITY_FEED_ID, page.cursor, timestampUriCursor),
-    ).toEqual({ value: '2026-07-21T08:00:00.000000Z', uri: oldest })
-  })
-
-  describe('runs cut at the cap', () => {
-    it('gives every chunk of a run the key of its first chunk and another run a new one', async () => {
+    it('omits the cid Hyperindex has not stored', async () => {
       const database = new FakeQueryExecutor([
         [
-          audioChunk(0),
-          audioChunk(1),
-          audioChunk(2, { total: 3, capped: false }),
-          audioChunk(3, {
-            uri: at('app.gainforest.ac.audio', 'other-run'),
-            continued: false,
-            total: 5,
-            capped: false,
-          }),
-        ],
-      ])
-
-      const { items } = await createFeed(database).loadPage(params(), {})
-
-      const keys = items.map(groupKeyOf)
-      expect(keys[0]).toMatch(GROUP_KEY)
-      expect(keys[1]).toBe(keys[0])
-      expect(keys[2]).toBe(keys[0])
-      expect(keys[3]).toMatch(GROUP_KEY)
-      expect(keys[3]).not.toBe(keys[0])
-      expect(
-        items.map((item) => 'continued' in item && item.continued),
-      ).toEqual([false, true, true, false])
-      expect(items.map((item) => 'capped' in item && item.capped)).toEqual([
-        true,
-        true,
-        false,
-        false,
-      ])
-    })
-
-    it('derives the key from the run, so a later request names the same run the same way', async () => {
-      const respond = () => new FakeQueryExecutor([[audioChunk(0)]])
-
-      const first = await createFeed(respond()).loadPage(params(), {})
-      const second = await createFeed(respond()).loadPage(params(), {})
-
-      expect(groupKeyOf(first.items[0])).toMatch(GROUP_KEY)
-      expect(groupKeyOf(second.items[0])).toBe(groupKeyOf(first.items[0]))
-    })
-
-    it('puts the run a page cut into the cursor with its key, so the next page continues it', async () => {
-      const database = new FakeQueryExecutor([
-        [audioChunk(0), sentinelRow({ item_no: 2, kind: 'audio' })],
-      ])
-
-      const page = await createFeed(database).loadPage(params(), { limit: 1 })
-
-      expect(
-        decodeCursor(ACTIVITY_FEED_ID, page.cursor, timestampUriCursor),
-      ).toEqual({
-        value: '2026-07-21T09:00:09.000000Z',
-        uri: at('app.gainforest.ac.audio', 'tail0'),
-        group: { key: groupKeyOf(page.items[0]), kind: 'audio' },
-      })
-    })
-
-    it('keeps record content out of the cursor, so what a record stores cannot grow it', async () => {
-      const longDid = `did:web:${'a'.repeat(1_990)}`
-      const database = new FakeQueryExecutor([
-        [
-          audioChunk(0, {
-            did: longDid,
-            deployment: `at://${longDid}/app.gainforest.ac.deployment/x`,
-          }),
-          sentinelRow({ item_no: 2, kind: 'audio' }),
-        ],
-      ])
-
-      const page = await createFeed(database).loadPage(params(), { limit: 1 })
-
-      expect(page.items[0]).toMatchObject({ did: longDid })
-      expect(page.cursor?.length).toBeLessThan(600)
-      expect(
-        decodeCursor(ACTIVITY_FEED_ID, page.cursor, timestampUriCursor),
-      ).toMatchObject({
-        group: { key: groupKeyOf(page.items[0]), kind: 'audio' },
-      })
-    })
-
-    it('puts a burst a page cut into the cursor in the same way', async () => {
-      const database = new FakeQueryExecutor([
-        [
-          itemRow({
-            kind: 'observation',
-            uri: at('app.gainforest.dwc.occurrence', 'head'),
-            total: MAX_GROUP_ROWS,
-            capped: true,
-            tail_uri: at('app.gainforest.dwc.occurrence', 'tail'),
-          }),
-          sentinelRow({ item_no: 2, kind: 'observation' }),
-        ],
-      ])
-
-      const page = await createFeed(database).loadPage(params(), { limit: 1 })
-
-      expect(
-        decodeCursor(ACTIVITY_FEED_ID, page.cursor, timestampUriCursor),
-      ).toEqual({
-        value: '2026-07-21T10:00:05.000000Z',
-        uri: at('app.gainforest.dwc.occurrence', 'tail'),
-        group: { key: groupKeyOf(page.items[0]), kind: 'observation' },
-      })
-    })
-
-    it('leaves the cursor without a run when the last chunk ended its run', async () => {
-      const database = new FakeQueryExecutor([
-        [
-          audioChunk(1, { capped: false, total: 12 }),
-          sentinelRow({ item_no: 2, kind: 'observation' }),
-        ],
-      ])
-
-      const page = await createFeed(database).loadPage(params(), {
-        limit: 1,
-        cursor: encodedCursor({
-          value: '2026-07-21T11:00:00.000000Z',
-          uri: at('app.gainforest.ac.audio', 'before'),
-          group: { key: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'audio' },
-        }),
-      })
-
-      const decoded = decodeCursor(
-        ACTIVITY_FEED_ID,
-        page.cursor,
-        timestampUriCursor,
-      )
-      expect(decoded).not.toHaveProperty('group')
-    })
-
-    it('keeps the key of the run the cursor left open for the first chunk of the page', async () => {
-      const database = new FakeQueryExecutor([
-        [audioChunk(1, { capped: false, total: 12 })],
-      ])
-
-      const page = await createFeed(database).loadPage(params(), {
-        cursor: encodedCursor({
-          value: '2026-07-21T11:00:00.000000Z',
-          uri: at('app.gainforest.ac.audio', 'before'),
-          group: { key: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'audio' },
-        }),
-      })
-
-      expect(page.items[0]).toMatchObject({
-        $type: AUDIO_ITEM_TYPE,
-        continued: true,
-        capped: false,
-        groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
-      })
-    })
-
-    it('keeps a one-row continuation a burst, so clients merge it into the run', async () => {
-      const database = new FakeQueryExecutor([
-        [
-          itemRow({
-            kind: 'observation',
-            uri: at('app.gainforest.dwc.occurrence', 'last'),
-            total: 1,
-            continued: true,
-          }),
-        ],
-      ])
-
-      const page = await createFeed(database).loadPage(params(), {
-        cursor: encodedCursor({
-          value: '2026-07-21T11:00:00.000000Z',
-          uri: at('app.gainforest.dwc.occurrence', 'before'),
-          group: { key: 'AAAAAAAAAAAAAAAAAAAAAA', kind: 'observation' },
-        }),
-      })
-
-      expect(page.items[0]).toMatchObject({
-        $type: BURST_ITEM_TYPE,
-        total: 1,
-        continued: true,
-        groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
-      })
-    })
-
-    it('keeps a lone first observation a record item', async () => {
-      const database = new FakeQueryExecutor([
-        [
-          itemRow({
-            kind: 'observation',
-            uri: at('app.gainforest.dwc.occurrence', 'lone'),
-            total: 1,
+          postRow(2, { cid: null }),
+          postRow(1, {
+            kind: 'repost',
+            uri: at('app.gainforest.feed.repost', 'r1'),
+            subject: at('app.gainforest.feed.post', 'subject'),
+            cid: null,
           }),
         ],
       ])
 
       const page = await createFeed(database).loadPage(params(), {})
 
-      expect(page.items[0]).toMatchObject({ $type: RECORD_ITEM_TYPE })
+      expect(page.items).toHaveLength(2)
+      for (const item of page.items) expect(item).not.toHaveProperty('cid')
     })
 
-    it('fails when a chunk continues a run that nothing names', async () => {
-      const database = new FakeQueryExecutor([[audioChunk(1)]])
+    // `deployment` has `format: at-uri` and the output check is strict. One
+    // folder that fails it would answer 500 on every page that holds the
+    // recording, so the card names a folder only when it passes. The expected
+    // column is written out, not computed, so the table pins the rule.
+    describe('the folder of an audio group', () => {
+      it.each([
+        ['the AT-URI of a folder', folder, true],
+        ['a DID alone', `at://${authorDid}`, true],
+        [
+          'a handle with a collection and a key',
+          'at://recorders.example/app.gainforest.ac.deployment/f',
+          true,
+        ],
+        ['an authority that is not a DID or a handle', 'at://did:/x', false],
+        [
+          'a path that is not a collection and a key',
+          `at://${authorDid}/x`,
+          false,
+        ],
+        ['a trailing slash', `${folder}/`, false],
+        ['a query', `${folder}?x=1`, false],
+        ['a fragment', `${folder}#frag`, false],
+        ['a space', `${folder} f`, false],
+        ['nothing after the scheme', 'at://', false],
+        [
+          'a DID over 2,048 characters',
+          `at://did:web:${'a'.repeat(2_100)}/app.gainforest.ac.deployment/f`,
+          false,
+        ],
+      ])(
+        'names %s only when it is a valid AT-URI',
+        async (_name, deployment, named) => {
+          const database = new FakeQueryExecutor([
+            [3, 2, 1].map((index) =>
+              recordingRow(index, { folder: deployment }),
+            ),
+          ])
 
-      await expect(createFeed(database).loadPage(params(), {})).rejects.toThrow(
-        'Activity feed query invariant failed',
+          const page = await createFeed(database).loadPage(params(), {})
+
+          const [item] = page.items
+          expect(item).toMatchObject({
+            $type: GROUP_ITEM_TYPE,
+            kind: 'audio',
+            did: authorDid,
+            total: 3,
+            groupKey: expect.stringMatching(GROUP_KEY) as unknown,
+          })
+          expect(item !== undefined && 'deployment' in item).toBe(named)
+          // Whatever a record stores, the page passes the output check.
+          expect(() =>
+            $output.schema.$parse({ feed: page.items }),
+          ).not.toThrow()
+        },
       )
     })
 
-    it('does not continue a run across an item that is not part of it', async () => {
+    it('omits the deployment of a group of recordings without a folder', async () => {
       const database = new FakeQueryExecutor([
-        [audioChunk(0), itemRow({ item_no: 2 }), audioChunk(2)],
+        [3, 2, 1].map((index) => recordingRow(index, { folder: null })),
       ])
 
-      await expect(createFeed(database).loadPage(params(), {})).rejects.toThrow(
-        'continues a run that neither the previous item nor the cursor names',
-      )
+      const page = await createFeed(database).loadPage(params(), {})
+
+      expect(page.items[0]).toMatchObject({ $type: GROUP_ITEM_TYPE, total: 3 })
+      expect(page.items[0]).not.toHaveProperty('deployment')
+    })
+
+    it('gives the same group the same key in two requests', async () => {
+      const respond = () =>
+        new FakeQueryExecutor([[3, 2, 1].map((index) => recordingRow(index))])
+
+      const first = await createFeed(respond()).loadPage(params(), {})
+      const second = await createFeed(respond()).loadPage(params(), {})
+
+      expect(first.items[0]).toHaveProperty('groupKey')
+      expect(second.items[0]).toEqual(first.items[0])
+    })
+
+    it('keeps record content out of the cursor, so what a record stores cannot grow it', async () => {
+      const longDid = `did:web:${'a'.repeat(1_990)}`
+      const longFolder = `at://${longDid}/app.gainforest.ac.deployment/x`
+      const database = new FakeQueryExecutor([
+        [
+          ...[3, 2, 1].map((index) =>
+            recordingRow(index + 10, { owner: longDid, folder: longFolder }),
+          ),
+          postRow(0),
+        ],
+      ])
+
+      const page = await createFeed(database).loadPage(params(), { limit: 1 })
+
+      expect(page.items[0]).toMatchObject({ did: longDid, total: 3 })
+      expect(page.cursor?.length).toBeLessThan(400)
     })
   })
 
-  it('does not hide database failures behind a public error', async () => {
-    const timeout = Object.assign(
-      new Error('canceling statement due to statement timeout'),
-      { code: '57014' },
-    )
-    const database = new FakeQueryExecutor([timeout])
+  describe('pages', () => {
+    it('answers a page from one statement when the first batch fills it', async () => {
+      const database = new FakeQueryExecutor([posts(9, 5)])
 
-    const failure = await createFeed(database)
-      .loadPage(params(), {})
-      .then(
-        () => undefined,
-        (error: unknown) => error,
+      const page = await createFeed(database).loadPage(params(), { limit: 2 })
+
+      expect(database.calls).toHaveLength(1)
+      expect(page.items).toHaveLength(2)
+      expect(cursorOf(page.cursor)).toEqual({
+        value: timeOf(8),
+        uri: at('app.gainforest.feed.post', 'p8'),
+      })
+    })
+
+    it('points the cursor at the last row the page consumed, not at its last item', async () => {
+      // The page's second card is a post; the rows after it join the first card.
+      const database = new FakeQueryExecutor([
+        [
+          recordingRow(9),
+          postRow(8),
+          recordingRow(7),
+          recordingRow(6),
+          recordingRow(5),
+          postRow(4),
+        ],
+      ])
+
+      const page = await createFeed(database).loadPage(params(), { limit: 2 })
+
+      expect(page.items).toHaveLength(2)
+      expect(page.items[0]).toMatchObject({ $type: GROUP_ITEM_TYPE, total: 4 })
+      expect(cursorOf(page.cursor)).toEqual({
+        value: timeOf(5),
+        uri: at('app.gainforest.ac.audio', 'a5'),
+      })
+    })
+
+    it('fetches the next batch after the last consumed row when the page needs more rows', async () => {
+      const database = new FakeQueryExecutor([
+        posts(9, 3),
+        posts(6, 3),
+        posts(3, 2),
+      ])
+
+      const page = await createFeed(database, { batchRows: 3 }).loadPage(
+        params(),
+        { limit: 20 },
       )
 
-    expect(failure).toBe(timeout)
-    expect(failure).not.toBeInstanceOf(FeedError)
-    expect(database.calls).toHaveLength(1)
+      expect(database.calls.map((call) => call.values.slice(1))).toEqual([
+        [null, null, 3],
+        [timeOf(7), at('app.gainforest.feed.post', 'p7'), 3],
+        [timeOf(4), at('app.gainforest.feed.post', 'p4'), 3],
+      ])
+      expect(page.items).toHaveLength(8)
+      expect(page.cursor).toBeUndefined()
+    })
+
+    it('asks again when a batch is exactly full, and an empty batch ends the page', async () => {
+      const database = new FakeQueryExecutor([posts(5, 2), posts(3, 2), []])
+
+      const page = await createFeed(database, { batchRows: 2 }).loadPage(
+        params(),
+        { limit: 20 },
+      )
+
+      expect(database.calls).toHaveLength(3)
+      expect(page.items).toHaveLength(4)
+      expect(page.cursor).toBeUndefined()
+    })
+
+    it('does not fetch again once a row would start a card the page has no room for', async () => {
+      const database = new FakeQueryExecutor([posts(9, 3)])
+
+      const page = await createFeed(database, { batchRows: 3 }).loadPage(
+        params(),
+        { limit: 2 },
+      )
+
+      expect(database.calls).toHaveLength(1)
+      expect(page.items).toHaveLength(2)
+      expect(cursorOf(page.cursor)?.uri).toBe(
+        at('app.gainforest.feed.post', 'p8'),
+      )
+    })
+
+    it('needs the next batch to tell whether the first row of it starts a card', async () => {
+      const database = new FakeQueryExecutor([posts(9, 2), posts(7, 2)])
+
+      const page = await createFeed(database, { batchRows: 2 }).loadPage(
+        params(),
+        { limit: 2 },
+      )
+
+      expect(database.calls).toHaveLength(2)
+      expect(page.items).toHaveLength(2)
+      expect(cursorOf(page.cursor)?.uri).toBe(
+        at('app.gainforest.feed.post', 'p8'),
+      )
+    })
+
+    it('ends at the row budget with a cursor, and says more on a group card that a later row can join', async () => {
+      const database = new FakeQueryExecutor([
+        [9, 8, 7].map((index) => recordingRow(index)),
+        [6, 5, 4].map((index) => recordingRow(index)),
+      ])
+
+      const page = await createFeed(database, {
+        batchRows: 3,
+        requestRows: 6,
+      }).loadPage(params(), { limit: 20 })
+
+      expect(database.calls).toHaveLength(2)
+      expect(page.items).toMatchObject([
+        { $type: GROUP_ITEM_TYPE, total: 6, more: true },
+      ])
+      expect(cursorOf(page.cursor)).toEqual({
+        value: timeOf(4),
+        uri: at('app.gainforest.ac.audio', 'a4'),
+      })
+    })
+
+    it('asks for only the rest of the budget in the last batch', async () => {
+      const database = new FakeQueryExecutor([
+        [9, 8].map((index) => recordingRow(index)),
+        [7, 6].map((index) => recordingRow(index)),
+        [5].map((index) => recordingRow(index)),
+      ])
+
+      await createFeed(database, { batchRows: 2, requestRows: 5 }).loadPage(
+        params(),
+        { limit: 20 },
+      )
+
+      expect(database.calls.map((call) => call.values[3])).toEqual([2, 2, 1])
+    })
+
+    it('says nothing and has no cursor when a short batch ended the page', async () => {
+      const database = new FakeQueryExecutor([
+        [9, 8, 7].map((index) => recordingRow(index)),
+      ])
+
+      const page = await createFeed(database, {
+        batchRows: 5,
+        requestRows: 5,
+      }).loadPage(params(), { limit: 20 })
+
+      expect(page.items[0]).toMatchObject({ total: 3 })
+      expect(page.items[0]).not.toHaveProperty('more')
+      expect(page.cursor).toBeUndefined()
+    })
+
+    it('never runs more statements than the budget allows', async () => {
+      const database = new FakeQueryExecutor(
+        Array.from({ length: 12 }, (_, batch) =>
+          posts(1_000 - batch * 500, 500),
+        ),
+      )
+
+      // Every post is its own card, so a page of 50 needs a single batch.
+      await createFeed(database).loadPage(params(), { limit: 50 })
+      expect(database.calls).toHaveLength(1)
+
+      // Rows that all join one group would need every batch; the budget stops it.
+      const dump = new FakeQueryExecutor(
+        Array.from({ length: 12 }, (_, batch) =>
+          Array.from({ length: 500 }, (_, offset) =>
+            recordingRow(10_000 - batch * 500 - offset),
+          ),
+        ),
+      )
+      const page = await createFeed(dump).loadPage(params(), { limit: 50 })
+
+      expect(dump.calls).toHaveLength(10)
+      expect(page.items).toMatchObject([{ total: 5_000, more: true }])
+      expect(page.cursor).toBeDefined()
+    })
+
+    // The statement formats times with six fractional digits, and the 12-hour
+    // rule is exact to the microsecond. Reading them at millisecond precision
+    // would join rows that are 12 hours and a few microseconds apart, so these
+    // times differ only below the millisecond. The first two rows are a minute
+    // apart; the third is placed relative to the second.
+    it.each([
+      ['rows exactly 12 hours apart join', '2026-07-21T09:59:00.000600Z', true],
+      [
+        'rows 12 hours less 200 microseconds apart join',
+        '2026-07-21T09:59:00.000800Z',
+        true,
+      ],
+      [
+        'rows 12 hours and 1 microsecond apart do not join',
+        '2026-07-21T09:59:00.000599Z',
+        false,
+      ],
+      [
+        'rows 12 hours and 200 microseconds apart do not join',
+        '2026-07-21T09:59:00.000400Z',
+        false,
+      ],
+    ])('reads times to the microsecond: %s', async (_name, oldest, joins) => {
+      const database = new FakeQueryExecutor([
+        [
+          observationRow(3, { sort_value: '2026-07-21T22:00:00.000600Z' }),
+          observationRow(2, { sort_value: '2026-07-21T21:59:00.000600Z' }),
+          observationRow(1, { sort_value: oldest }),
+        ],
+      ])
+
+      const page = await createFeed(database).loadPage(params(), {})
+
+      expect(page.items.map((item) => item.$type)).toEqual(
+        joins
+          ? [GROUP_ITEM_TYPE]
+          : [RECORD_ITEM_TYPE, RECORD_ITEM_TYPE, RECORD_ITEM_TYPE],
+      )
+    })
+
+    it('returns an empty page when the statement finds no row', async () => {
+      const page = await createFeed(new FakeQueryExecutor([[]])).loadPage(
+        params(),
+        {},
+      )
+
+      expect(page).toEqual({ items: [], uris: [] })
+    })
+
+    it('does not hide database failures behind a public error', async () => {
+      const timeout = Object.assign(
+        new Error('canceling statement due to statement timeout'),
+        { code: '57014' },
+      )
+      const database = new FakeQueryExecutor([timeout])
+
+      const failure = await createFeed(database)
+        .loadPage(params(), {})
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        )
+
+      expect(failure).toBe(timeout)
+      expect(failure).not.toBeInstanceOf(FeedError)
+      expect(database.calls).toHaveLength(1)
+    })
+
+    it('does not hide a failure of a later batch', async () => {
+      const failure = new Error('connection terminated')
+      const database = new FakeQueryExecutor([posts(3, 3), failure])
+
+      await expect(
+        createFeed(database, { batchRows: 3 }).loadPage(params(), {
+          limit: 20,
+        }),
+      ).rejects.toBe(failure)
+    })
   })
 
   it.each([
     ['zero', 0],
-    ['one', 1],
     ['a fraction', 2.5],
     ['not a number', Number.NaN],
-  ])('rejects a group cap of %s at construction', (_name, maxGroupRows) => {
-    expect(() =>
-      createFeed(new FakeQueryExecutor([]), { maxGroupRows }),
-    ).toThrow('maxGroupRows must be an integer of at least 2')
-  })
-
-  it('applies the defaults when a request omits params', async () => {
-    const database = new FakeQueryExecutor([[]])
-    const feed = createFeed(database)
-
-    expect(feed.defaultParams).toEqual({ $type: ACTIVITY_FEED_PARAMS_TYPE })
-    await expect(feed.loadPage(undefined, {})).resolves.toEqual({ items: [] })
-
-    expect(database.calls[0]?.values).toEqual([
-      ['project', 'observation', 'organization', 'post', 'repost', 'audio'],
-      false,
-      null,
-      null,
-      null,
-      21,
-      4_001,
-      43_200,
-      20,
-      200,
-      null,
-    ])
+    ['negative', -1],
+  ])('rejects a batch of %s rows at construction', (_name, batchRows) => {
+    expect(() => createFeed(new FakeQueryExecutor([]), { batchRows })).toThrow(
+      'batchRows must be an integer of at least 1',
+    )
   })
 
   it.each([
-    ['a repost without a subject', { kind: 'repost', subject: null }],
-    ['a burst without samples', { kind: 'observation', total: 3, samples: [] }],
-    ['an audio item without samples', { kind: 'audio', samples: null }],
-    ['an unknown kind', { kind: 'donation' }],
-    ['an item without a row count', { total: null }],
-    ['an item without a last row', { tail_uri: null }],
-  ])('fails on %s instead of dropping it', async (_name, overrides) => {
-    const database = new FakeQueryExecutor([[itemRow(overrides)]])
+    ['zero', 0],
+    ['a fraction', 2.5],
+    ['not a number', Number.NaN],
+  ])('rejects a budget of %s rows at construction', (_name, requestRows) => {
+    expect(() =>
+      createFeed(new FakeQueryExecutor([]), { requestRows }),
+    ).toThrow('requestRows must be an integer of at least 1')
+  })
+
+  it.each([
+    ['a recording without an owner', recordingRow(1, { owner: null })],
+    ['a repost without a subject', postRow(1, { kind: 'repost' })],
+    ['an unknown kind', postRow(1, { kind: 'donation' })],
+    ['an unreadable time', postRow(1, { sort_value: 'yesterday' })],
+  ])('fails on %s instead of dropping it', async (_name, row) => {
+    const database = new FakeQueryExecutor([[row]])
 
     await expect(createFeed(database).loadPage(params(), {})).rejects.toThrow(
       'Activity feed query invariant failed',
+    )
+  })
+
+  it('fails when the statement returns a row newer than the one before it', async () => {
+    const database = new FakeQueryExecutor([[postRow(1), postRow(2)]])
+
+    await expect(createFeed(database).loadPage(params(), {})).rejects.toThrow(
+      'is newer than the row before it',
     )
   })
 })

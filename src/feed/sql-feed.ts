@@ -2,12 +2,7 @@ import { performance } from 'node:perf_hooks'
 
 import type { QueryResultRow } from 'pg'
 
-import {
-  decodeCursor,
-  encodeCursor,
-  type CursorCodec,
-  type OpenGroup,
-} from './cursor.js'
+import { decodeCursor, encodeCursor, type CursorCodec } from './cursor.js'
 import { FeedError, FeedErrorCode } from './errors.js'
 import { feedItemKind } from './items.js'
 import type { FeedPage, FeedPagination, RegisteredFeed } from './registry.js'
@@ -35,20 +30,22 @@ export interface SqlFeedRuntime<Row extends QueryResultRow> {
 export interface FeedPosition {
   readonly sortValue: string
   readonly uri: string
-  /** The run the page cut at its size limit, so the next page can continue it. */
-  readonly group?: OpenGroup
 }
 
-/** One selected feed item and the last feed position it consumed. */
+/** One selected feed item and the AT-URIs of every record it covers. */
 export interface SelectedItem {
   readonly item: ActivityFeedItem
-  readonly position: FeedPosition
+  /** The records the item covers, newest first; a skeleton lists all of them. */
+  readonly uris: readonly string[]
 }
 
-/** The items selected for one page, and whether a later page exists. */
+/**
+ * The items selected for one page. `next` is the last row the page consumed,
+ * and is present only when another page can follow.
+ */
 export interface SelectedPage {
   readonly items: readonly SelectedItem[]
-  readonly hasNext: boolean
+  readonly next?: FeedPosition
 }
 
 export interface SqlFeedDefinition<
@@ -70,8 +67,8 @@ export interface SqlFeedDefinition<
   }
   readonly cursor: CursorCodec<Cursor, FeedPosition>
   /**
-   * Selects at most `params.limit` items in feed order strictly after
-   * `cursor`, and reports whether another item follows them.
+   * Selects the page's items in feed order strictly after `cursor`. The feed
+   * decides how many items a page holds and where the next page starts.
    */
   readonly select: (
     database: SqlFeedQueryExecutor<DatabaseRow>,
@@ -134,27 +131,22 @@ export const defineSqlFeed = <
       )
     }
 
-    if (selected.items.length > normalized.limit) {
-      throw new Error(
-        `Feed query for ${definition.id} selected ${String(selected.items.length)} items for a page limit of ${String(normalized.limit)}; apply the page limit when selecting items.`,
-      )
-    }
     runtime.metrics.observeResult(
       selected.items.map(({ item }) => feedItemKind(item)),
     )
 
-    const last = selected.items.at(-1)
     return {
       items: selected.items.map(({ item }) => item),
-      ...(selected.hasNext && last
-        ? {
+      uris: selected.items.flatMap(({ uris }) => uris),
+      ...(selected.next === undefined
+        ? {}
+        : {
             cursor: encodeCursor(
               definition.id,
-              last.position,
+              selected.next,
               definition.cursor,
             ),
-          }
-        : {}),
+          }),
     }
   }
 

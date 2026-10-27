@@ -9,7 +9,7 @@
     },
     "activityFeedParams": {
       "type": "object",
-      "description": "Parameters accepted by the GainForest activity feed. A request that omits params gets the defaults: filter all and following false. Anonymous requests need no viewer unless following is true, in which case viewerDid is required. Authenticated service requests use the verified issuer as the viewer.",
+      "description": "Parameters accepted by the GainForest activity feed. A request that omits params gets the default filter, all. The feed is the same for every caller, and properties not defined here are ignored.",
       "properties": {
         "filter": {
           "type": "string",
@@ -24,29 +24,24 @@
           ],
           "default": "all",
           "description": "Which kind of activity to include. Reposts appear only when the filter is all."
-        },
-        "viewerDid": {
-          "type": "string",
-          "format": "did",
-          "maxLength": 256,
-          "description": "Viewer whose current follows scope the feed when following is true. Required for anonymous requests that set following. When the request is authenticated, it must be omitted or equal the verified issuer."
-        },
-        "following": {
-          "type": "boolean",
-          "default": false,
-          "description": "When true, limit the feed to activity by accounts the viewer follows through app.certified.graph.follow records. Reposts are scoped to the account that reposted, and audio runs to the owner of the run's recorder folder."
         }
       }
     },
     "recordItem": {
       "type": "object",
       "required": ["kind", "uri", "did", "createdAt"],
-      "description": "Reference to one project, observation, organization, or post record. It carries no record content.",
+      "description": "Reference to one project, observation, organization, post, or audio recording. It carries no record content. An observation or a recording appears as a recordItem when it is not part of a groupItem: a group of fewer than 3 rows is returned as separate recordItems, and bioacoustic sightings are never grouped.",
       "properties": {
         "kind": {
           "type": "string",
           "maxLength": 64,
-          "knownValues": ["project", "observation", "organization", "post"],
+          "knownValues": [
+            "project",
+            "observation",
+            "organization",
+            "post",
+            "audio"
+          ],
           "description": "Which kind of record the uri points at."
         },
         "uri": {
@@ -103,108 +98,65 @@
         }
       }
     },
-    "burstItem": {
+    "groupItem": {
       "type": "object",
-      "required": ["did", "total", "from", "to", "subjects", "groupKey"],
-      "description": "One chunk of a run of observations by one account that are adjacent in the feed with no gap over 12 hours. A chunk covers at most 200 observations. A longer run continues in the following items, which have continued set and the same groupKey; merge them into one card. A chunk of a single observation is a burstItem only when it continues a run. Only a sample of the chunk is referenced.",
+      "required": [
+        "kind",
+        "did",
+        "groupKey",
+        "total",
+        "from",
+        "to",
+        "subjects"
+      ],
+      "description": "One card that groups at least 3 rows of one kind: observations by one account, or recordings in one recorder folder. The page folds every row of the group into the card as long as it is no more than 12 hours older than the group's previous row, whatever other rows lie between them, and places the card at its newest row. Bioacoustic sightings, reposts, posts, projects, and organizations are never grouped, and a group of fewer than 3 rows is returned as separate recordItems. A group can continue on a later page. Keep the last card shown for each groupKey; when a later card has the same groupKey and its `to` is no more than 12 hours before that card's `from`, merge it into that card: add `total`, take the later card's `from` and `more`, and append `subjects`. Only a sample of the card is referenced.",
       "properties": {
-        "did": {
+        "kind": {
           "type": "string",
-          "format": "did",
-          "description": "Account that owns every observation in the run."
-        },
-        "total": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 200,
-          "description": "Number of observations in this item, at most 200. It is not the size of the whole run when the run continues in other items."
-        },
-        "from": {
-          "type": "string",
-          "format": "datetime",
-          "description": "createdAt of the oldest observation in this item."
-        },
-        "to": {
-          "type": "string",
-          "format": "datetime",
-          "description": "createdAt of the newest observation in this item. This orders the item in the feed."
-        },
-        "subjects": {
-          "type": "array",
-          "maxLength": 20,
-          "items": { "type": "string", "format": "at-uri" },
-          "description": "AT-URIs of up to 20 observations from this item, newest first."
-        },
-        "groupKey": {
-          "type": "string",
-          "minLength": 1,
           "maxLength": 64,
-          "description": "Opaque identifier of the run. Every chunk of one run has the same value and no two runs share one. It is stable only while one client pages through the feed: it changes when a newer record joins the run, so do not keep it as a long-lived identity across refreshes."
+          "knownValues": ["observation", "audio"],
+          "description": "What the card groups: observations by one account, or audio recordings in one recorder folder."
         },
-        "continued": {
-          "type": "boolean",
-          "default": false,
-          "description": "True when this item continues the run of the previous item, which has the same groupKey. False for the first chunk of a run."
-        },
-        "capped": {
-          "type": "boolean",
-          "default": false,
-          "description": "True when this item is full and the run goes on in the next item, so the run is larger than the chunks seen so far. Results are current state, so a capped item is not guaranteed to be followed by an item with continued set: treat continued as the authority."
-        }
-      }
-    },
-    "audioItem": {
-      "type": "object",
-      "required": ["did", "total", "from", "to", "subjects", "groupKey"],
-      "description": "One chunk of a run of recordings in one recorder folder that are adjacent in the feed with no gap over 12 hours, whoever stored them. A recording without a folder is grouped by its own account. A chunk covers at most 200 recordings. A longer run continues in the following items, which have continued set and the same groupKey; merge them into one card. Only a sample of the chunk is referenced.",
-      "properties": {
         "did": {
           "type": "string",
           "format": "did",
-          "description": "Owner of the run: the account in the AT-URI of the recorder folder, or the recording's own account when it has no folder."
+          "description": "Account that owns every observation in the card, or owner of the recorder folder: the account in the folder's AT-URI, or the recording's own account when it has no folder."
         },
         "deployment": {
           "type": "string",
           "format": "at-uri",
-          "description": "AT-URI of the app.gainforest.ac.deployment folder the recordings belong to. Omitted for recordings without a folder and when the recording's deploymentRef is not a valid AT-URI."
-        },
-        "total": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 200,
-          "description": "Number of recordings in this item, at most 200. It is not the size of the whole run when the run continues in other items."
-        },
-        "from": {
-          "type": "string",
-          "format": "datetime",
-          "description": "createdAt of the oldest recording in this item."
-        },
-        "to": {
-          "type": "string",
-          "format": "datetime",
-          "description": "createdAt of the newest recording in this item. This orders the item in the feed."
-        },
-        "subjects": {
-          "type": "array",
-          "maxLength": 20,
-          "items": { "type": "string", "format": "at-uri" },
-          "description": "AT-URIs of up to 20 recordings from this item, newest first."
+          "description": "AT-URI of the app.gainforest.ac.deployment folder the recordings belong to. Only on audio cards. Omitted for recordings without a folder and when the recordings' deploymentRef is not a valid AT-URI."
         },
         "groupKey": {
           "type": "string",
           "minLength": 1,
           "maxLength": 64,
-          "description": "Opaque identifier of the run. Every chunk of one run has the same value and no two runs share one. It is stable only while one client pages through the feed: it changes when a newer record joins the run, so do not keep it as a long-lived identity across refreshes."
+          "description": "Opaque, stable hash of the card's kind, owner, and folder. It names the group, not the card: it is the same on every page and in every request, and two cards of one group, such as the cards a gap of more than 12 hours splits it into, carry the same groupKey."
         },
-        "continued": {
-          "type": "boolean",
-          "default": false,
-          "description": "True when this item continues the run of the previous item, which has the same groupKey. False for the first chunk of a run."
+        "total": {
+          "type": "integer",
+          "minimum": 3,
+          "description": "Number of rows in this card."
         },
-        "capped": {
+        "from": {
+          "type": "string",
+          "format": "datetime",
+          "description": "createdAt of the oldest row in this card."
+        },
+        "to": {
+          "type": "string",
+          "format": "datetime",
+          "description": "createdAt of the newest row in this card. This orders the card in the feed."
+        },
+        "subjects": {
+          "type": "array",
+          "maxLength": 20,
+          "items": { "type": "string", "format": "at-uri" },
+          "description": "AT-URIs of up to 20 rows of this card, newest first."
+        },
+        "more": {
           "type": "boolean",
-          "default": false,
-          "description": "True when this item is full and the run goes on in the next item, so the run is larger than the chunks seen so far. Results are current state, so a capped item is not guaranteed to be followed by an item with continued set: treat continued as the authority."
+          "description": "True when the request's row budget (5,000 rows) ended the page while this card could still be continued: it is the group's latest card and the page's last row is within 12 hours of its oldest row, so a later row can join it. Omitted otherwise. Its absence does not mean the group is complete: a group also continues after a page that ended for another reason, so always merge cards by groupKey and the 12-hour rule."
         }
       }
     }

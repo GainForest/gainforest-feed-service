@@ -1,5 +1,3 @@
-import { isValidDid } from '@atproto/syntax'
-
 import { FeedError, FeedErrorCode } from './errors.js'
 import type { FeedPagination } from './registry.js'
 import {
@@ -31,19 +29,6 @@ export const normalizeActivityRequest = (
     )
   }
 
-  const following = input.following ?? false
-  const viewerDid = input.viewerDid
-  if (viewerDid !== undefined && !isValidDid(viewerDid)) {
-    throw invalidFeedParams(
-      'viewerDid is not a valid DID; provide the viewer account as a syntactically valid DID.',
-    )
-  }
-  if (following && viewerDid === undefined) {
-    throw invalidFeedParams(
-      'following requires a viewer; send a service-auth bearer token or provide params.viewerDid, then retry.',
-    )
-  }
-
   const limit = pagination.limit ?? DEFAULT_LIMIT
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
     throw invalidFeedParams(
@@ -53,8 +38,6 @@ export const normalizeActivityRequest = (
 
   return {
     filter,
-    following,
-    ...(following && viewerDid !== undefined ? { viewerDid } : {}),
     limit,
     ...(pagination.cursor === undefined ? {} : { cursor: pagination.cursor }),
   }

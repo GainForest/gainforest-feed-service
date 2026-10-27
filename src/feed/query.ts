@@ -1,19 +1,14 @@
-import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
-import { isAtUriString } from '@atproto/syntax'
 import type { QueryResultRow } from 'pg'
 
-import {
-  timestampUriCursor,
-  type FeedCursor,
-  type OpenGroup,
-} from './cursor.js'
+import { timestampUriCursor, type FeedCursor } from './cursor.js'
 import { FeedError, FeedErrorCode } from './errors.js'
+import { PageBuilder, type FeedRow } from './page-builder.js'
 import type { RegisteredFeed } from './registry.js'
 import {
   defineSqlFeed,
-  type SelectedItem,
+  type FeedPosition,
   type SelectedPage,
   type SqlFeedQueryExecutor,
   type SqlFeedRuntime,
@@ -21,17 +16,9 @@ import {
 import {
   ACTIVITY_FEED_ID,
   ACTIVITY_FEED_PARAMS_TYPE,
-  AUDIO_ITEM_TYPE,
-  BURST_ITEM_TYPE,
-  MAX_GROUP_ROWS,
-  RECORD_ITEM_KINDS,
-  RECORD_ITEM_TYPE,
-  REPOST_ITEM_TYPE,
-  type ActivityFeedItem,
   type ActivityFeedParams,
   type ActivityFilter,
   type NormalizedActivityRequest,
-  type RecordItemKind,
 } from './types.js'
 import { normalizeActivityRequest } from './validation.js'
 import { activityFeedParams as activityFeedParamsSchema } from '../lexicons/app/gainforest/feed/defs.js'
@@ -41,19 +28,33 @@ const ACTIVITY_FEED_QUERY = readFileSync(
   'utf8',
 )
 
-/** Longest gap between neighbouring rows inside one burst or audio run. */
-const BURST_MAX_GAP_SECONDS = 12 * 60 * 60
+/** Rows one statement returns. */
+export const BATCH_ROWS = 500
 
-/** Most sample URIs a burst or an audio item references. */
-const SAMPLE_SIZE = 20
+/**
+ * Rows one request consumes at most, so a request runs at most ten statements.
+ * A page that reaches it ends there, whatever it holds, and says `more` on the
+ * group cards that a later row can still join.
+ */
+export const REQUEST_ROWS = 5_000
 
 /** Internal options for the activity feed; they are not part of any request. */
 export interface ActivityFeedOptions {
   /**
-   * Most rows one burst or audio item covers. Tests use a small value to
-   * exercise chunking on small data sets; production uses `MAX_GROUP_ROWS`.
+   * Rows one statement returns. Tests use a small value to exercise batching
+   * on small data sets; production uses `BATCH_ROWS`.
    */
-  readonly maxGroupRows?: number
+  readonly batchRows?: number
+  /**
+   * Rows one request consumes at most. Tests use a small value to reach the
+   * budget on small data sets; production uses `REQUEST_ROWS`.
+   */
+  readonly requestRows?: number
+}
+
+interface RowLimits {
+  readonly batchRows: number
+  readonly requestRows: number
 }
 
 const ALL_KINDS = [
@@ -65,28 +66,17 @@ const ALL_KINDS = [
   'audio',
 ] as const
 
-const RECORD_KIND_SET = new Set<string>(RECORD_ITEM_KINDS)
-
-const isRecordItemKind = (value: string): value is RecordItemKind =>
-  RECORD_KIND_SET.has(value)
-
-/** One result row of the activity feed statement: one feed item. */
+/** One result row of the activity feed statement: one feed row. */
 export interface ActivityFeedQueryRow extends QueryResultRow {
-  readonly item_no: number
   readonly kind: string
   readonly uri: string
   readonly cid: string | null
   readonly did: string
   readonly sort_value: string
+  readonly owner: string | null
+  readonly folder: string | null
+  readonly bioacoustic: boolean
   readonly subject: string | null
-  readonly deployment: string | null
-  /** Rows the item covers. Null for the sentinel, which is never mapped. */
-  readonly total: number | null
-  readonly tail_sort_value: string | null
-  readonly tail_uri: string | null
-  readonly samples: readonly string[] | null
-  readonly continued: boolean
-  readonly capped: boolean
 }
 
 const rowInvariantError = (detail: string): Error =>
@@ -114,192 +104,75 @@ const parseActivityFeedParams = (input: {
     )
   }
 
-  // The generated parser applies the Lexicon defaults for filter and following.
+  // The generated parser applies the Lexicon default for filter. Only the
+  // properties the feed defines are kept: the Lexicon object is open, so any
+  // other property the caller sends is dropped here, never read.
   return {
     $type: ACTIVITY_FEED_PARAMS_TYPE,
     filter: parsed.filter,
-    following: parsed.following,
-    ...(parsed.viewerDid === undefined ? {} : { viewerDid: parsed.viewerDid }),
   }
 }
-
-/**
- * Rows the statement reads from the merged feed order for one page.
- *
- * The page's `limit` items cover at most `maxGroupRows` rows each. One more
- * row, the first row of the item after the page, proves that a next page
- * exists and tells whether the page's last chunk continues its run. A row
- * that follows an item is the first row of the next item, so no item needs a
- * lookahead row of its own. Reading this many rows always settles the page in
- * one statement.
- */
-const scanRowsFor = (limit: number, maxGroupRows: number): number =>
-  limit * maxGroupRows + 1
 
 const bindActivityFeed = (
   params: NormalizedActivityRequest,
-  cursor: FeedCursor | undefined,
-  maxGroupRows: number,
+  after: FeedPosition | undefined,
+  rows: number,
 ): readonly unknown[] => [
   kindsForFilter(params.filter),
-  params.following,
-  params.viewerDid ?? null,
-  cursor?.value ?? null,
-  cursor?.uri ?? null,
-  params.limit + 1,
-  scanRowsFor(params.limit, maxGroupRows),
-  BURST_MAX_GAP_SECONDS,
-  SAMPLE_SIZE,
-  maxGroupRows,
-  // Only the kind of the open run is bound. The statement reads the run's
-  // account and folder from the cursor row, never from the cursor.
-  cursor?.group?.kind ?? null,
+  after?.sortValue ?? null,
+  after?.uri ?? null,
+  rows,
 ]
 
-/** The group key of a run: opaque, and derived from the run's newest record. */
-const deriveGroupKey = (headUri: string): string =>
-  createHash('sha256').update(headUri).digest('base64url').slice(0, 22)
-
-/** An item row with the details the statement computes for the page's own items. */
-interface ItemRow extends ActivityFeedQueryRow {
-  readonly total: number
-  readonly tail_sort_value: string
-  readonly tail_uri: string
-}
-
-const hasDetails = (row: ActivityFeedQueryRow): row is ItemRow =>
-  row.total !== null && row.tail_sort_value !== null && row.tail_uri !== null
-
-const optionalCid = (row: ItemRow): { readonly cid?: string } =>
-  row.cid === null ? {} : { cid: row.cid }
-
 /**
- * The folder of an audio item, when the response can name it. `deployment`
- * has `format: at-uri`, and the output check applies the same strict test as
- * `isAtUriString`. One `deploymentRef` that fails it would fail every page
- * that holds the recording with a 500, so such a folder is left out. The
- * recordings still group by it, exactly as before.
+ * createdAt in microseconds since the epoch, from the statement's
+ * `YYYY-MM-DDTHH:MI:SS.UUUUUUZ`. The fraction is read apart, so a gap of
+ * exactly 12 hours is exact to the microsecond.
  */
-const deploymentOf = (row: ItemRow): { readonly deployment?: string } =>
-  row.deployment !== null && isAtUriString(row.deployment)
-    ? { deployment: row.deployment }
-    : {}
-
-const samplesOf = (row: ItemRow): readonly string[] => {
-  if (row.samples === null || row.samples.length === 0) {
-    throw rowInvariantError(`item ${row.uri} returned no sample URIs`)
+const microsOf = (uri: string, sortValue: string): number => {
+  const seconds = Date.parse(`${sortValue.slice(0, 19)}Z`)
+  const fraction = Number(sortValue.slice(20, 26))
+  if (!Number.isFinite(seconds) || !Number.isFinite(fraction)) {
+    throw rowInvariantError(`row ${uri} has the unreadable time ${sortValue}`)
   }
-  return row.samples
+  return seconds * 1_000 + fraction
 }
 
-/**
- * Audio items are always groups. An observation item is a group when it
- * covers several rows, or when it continues a run: a one-row chunk after a
- * capped chunk stays a burst so that clients merge it into the run's card.
- */
-const isGroupRow = (row: ItemRow): boolean =>
-  row.kind === 'audio' ||
-  (row.kind === 'observation' && (row.total > 1 || row.continued))
-
-const recordItem = (row: ItemRow, kind: RecordItemKind): ActivityFeedItem => ({
-  $type: RECORD_ITEM_TYPE,
-  kind,
-  uri: row.uri,
-  ...optionalCid(row),
-  did: row.did,
-  createdAt: row.sort_value,
-})
-
-const groupItem = (row: ItemRow, groupKey: string): ActivityFeedItem => {
-  const chunk = {
+/** Maps one statement row to a feed row, checking what its kind must have. */
+const toFeedRow = (row: ActivityFeedQueryRow): FeedRow => {
+  const base = {
+    uri: row.uri,
+    cid: row.cid,
     did: row.did,
-    total: row.total,
-    from: row.tail_sort_value,
-    to: row.sort_value,
-    subjects: samplesOf(row),
-    groupKey,
-    continued: row.continued,
-    capped: row.capped,
+    sortValue: row.sort_value,
+    micros: microsOf(row.uri, row.sort_value),
   }
-  return row.kind === 'audio'
-    ? {
-        $type: AUDIO_ITEM_TYPE,
-        ...chunk,
-        ...deploymentOf(row),
+  switch (row.kind) {
+    case 'project':
+    case 'organization':
+    case 'post':
+      return { ...base, kind: row.kind }
+    case 'observation':
+      return { ...base, kind: row.kind, bioacoustic: row.bioacoustic }
+    case 'audio':
+      if (row.owner === null) {
+        throw rowInvariantError(`recording ${row.uri} has no owner`)
       }
-    : { $type: BURST_ITEM_TYPE, ...chunk }
-}
-
-const mapSingleItem = (row: ItemRow): ActivityFeedItem => {
-  if (row.kind === 'repost') {
-    if (row.subject === null) {
-      throw rowInvariantError(`repost ${row.uri} has no subject`)
-    }
-    return {
-      $type: REPOST_ITEM_TYPE,
-      uri: row.uri,
-      ...optionalCid(row),
-      did: row.did,
-      createdAt: row.sort_value,
-      subject: row.subject,
-    }
+      return { ...base, kind: row.kind, owner: row.owner, folder: row.folder }
+    case 'repost':
+      if (row.subject === null) {
+        throw rowInvariantError(`repost ${row.uri} has no subject`)
+      }
+      return { ...base, kind: row.kind, subject: row.subject }
+    default:
+      throw rowInvariantError(`row ${row.uri} has unknown kind ${row.kind}`)
   }
-  if (isRecordItemKind(row.kind)) return recordItem(row, row.kind)
-  throw rowInvariantError(`item ${row.uri} has unknown kind ${row.kind}`)
 }
 
 /**
- * Maps the page's own item rows. A chunk after the first one of a run keeps
- * the run's group key: it comes from the previous item, or, for the first
- * item of the page, from the run the cursor left open.
- */
-const toSelectedItems = (
-  rows: readonly ActivityFeedQueryRow[],
-  open: OpenGroup | undefined,
-): SelectedItem[] => {
-  let previousKey = open?.key
-  return rows.map((row) => {
-    if (!hasDetails(row)) {
-      throw rowInvariantError(`item ${row.uri} has no row count or last row`)
-    }
-    const position = { sortValue: row.tail_sort_value, uri: row.tail_uri }
-    if (!isGroupRow(row)) {
-      previousKey = undefined
-      return { item: mapSingleItem(row), position }
-    }
-
-    if (row.continued && previousKey === undefined) {
-      throw rowInvariantError(
-        `item ${row.uri} continues a run that neither the previous item nor the cursor names`,
-      )
-    }
-    const groupKey =
-      row.continued && previousKey !== undefined
-        ? previousKey
-        : deriveGroupKey(row.uri)
-    previousKey = groupKey
-
-    return {
-      item: groupItem(row, groupKey),
-      position: {
-        ...position,
-        // Only a chunk the cap cut can be continued by the next page.
-        ...(row.capped
-          ? {
-              group: {
-                key: groupKey,
-                kind: row.kind === 'audio' ? 'audio' : 'observation',
-              },
-            }
-          : {}),
-      },
-    }
-  })
-}
-
-/**
- * Runs the feed statement once. It returns the page's items and the sentinel
- * item that proves a next page exists.
+ * Builds one page: fetches batches of rows after the cursor and folds them
+ * into cards until the page is full, the data ends, or the request has
+ * consumed its row budget. Each statement starts after the last consumed row.
  */
 const selectActivityPage = async (
   database: SqlFeedQueryExecutor<ActivityFeedQueryRow>,
@@ -307,25 +180,33 @@ const selectActivityPage = async (
     readonly params: NormalizedActivityRequest
     readonly cursor: FeedCursor | undefined
   },
-  maxGroupRows: number,
+  limits: RowLimits,
 ): Promise<SelectedPage> => {
-  const { rows } = await database.query(
-    ACTIVITY_FEED_QUERY,
-    bindActivityFeed(input.params, input.cursor, maxGroupRows),
-  )
-  return {
-    items: toSelectedItems(
-      rows.slice(0, input.params.limit),
-      input.cursor?.group,
-    ),
-    hasNext: rows.length > input.params.limit,
+  const page = new PageBuilder(input.params.limit)
+  let after: FeedPosition | undefined =
+    input.cursor === undefined
+      ? undefined
+      : { sortValue: input.cursor.value, uri: input.cursor.uri }
+  let consumed = 0
+  for (;;) {
+    const wanted = Math.min(limits.batchRows, limits.requestRows - consumed)
+    const { rows } = await database.query(
+      ACTIVITY_FEED_QUERY,
+      bindActivityFeed(input.params, after, wanted),
+    )
+    for (const row of rows) {
+      if (!page.accept(toFeedRow(row))) return page.finish('full')
+    }
+    consumed += rows.length
+    if (rows.length < wanted) return page.finish('exhausted')
+    if (consumed >= limits.requestRows) return page.finish('budget')
+    after = page.last
   }
 }
 
-const validateMaxGroupRows = (maxGroupRows: number): void => {
-  // A capped chunk of one row could not be told apart from a lone observation.
-  if (!Number.isSafeInteger(maxGroupRows) || maxGroupRows < 2) {
-    throw new Error('maxGroupRows must be an integer of at least 2.')
+const validateRowLimit = (name: string, value: number): void => {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be an integer of at least 1.`)
   }
 }
 
@@ -334,8 +215,12 @@ export const createActivityFeed = (
   runtime: SqlFeedRuntime<ActivityFeedQueryRow>,
   options: ActivityFeedOptions = {},
 ): RegisteredFeed => {
-  const maxGroupRows = options.maxGroupRows ?? MAX_GROUP_ROWS
-  validateMaxGroupRows(maxGroupRows)
+  const limits = {
+    batchRows: options.batchRows ?? BATCH_ROWS,
+    requestRows: options.requestRows ?? REQUEST_ROWS,
+  }
+  validateRowLimit('batchRows', limits.batchRows)
+  validateRowLimit('requestRows', limits.requestRows)
   return defineSqlFeed(runtime, {
     id: ACTIVITY_FEED_ID,
     params: {
@@ -345,7 +230,6 @@ export const createActivityFeed = (
       default: { $type: ACTIVITY_FEED_PARAMS_TYPE },
     },
     cursor: timestampUriCursor,
-    select: (database, input) =>
-      selectActivityPage(database, input, maxGroupRows),
+    select: (database, input) => selectActivityPage(database, input, limits),
   })
 }

@@ -7,8 +7,6 @@ import {
 } from '../src/feed/types.js'
 import { normalizeActivityRequest } from '../src/feed/validation.js'
 
-const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
-
 const params = (
   overrides: Partial<ActivityFeedParams> = {},
 ): ActivityFeedParams => ({
@@ -26,10 +24,9 @@ const thrownBy = (action: () => unknown): unknown => {
 }
 
 describe('normalizeActivityRequest', () => {
-  it('defaults to the unscoped feed of every kind', () => {
+  it('defaults to the feed of every kind', () => {
     expect(normalizeActivityRequest(params())).toEqual({
       filter: 'all',
-      following: false,
       limit: 20,
     })
   })
@@ -47,17 +44,6 @@ describe('normalizeActivityRequest', () => {
     }
   })
 
-  it('keeps the viewer only when the feed is scoped to follows', () => {
-    expect(
-      normalizeActivityRequest(params({ viewerDid, following: true })),
-    ).toEqual({ filter: 'all', following: true, viewerDid, limit: 20 })
-    expect(normalizeActivityRequest(params({ viewerDid }))).toEqual({
-      filter: 'all',
-      following: false,
-      limit: 20,
-    })
-  })
-
   it('passes the cursor and an explicit limit through', () => {
     expect(
       normalizeActivityRequest(params(), { limit: 50, cursor: 'opaque' }),
@@ -66,8 +52,6 @@ describe('normalizeActivityRequest', () => {
 
   it.each([
     ['an unknown filter', params({ filter: 'donation' }), {}],
-    ['a malformed viewer DID', params({ viewerDid: 'not-a-did' }), {}],
-    ['following without a viewer', params({ following: true }), {}],
     ['a zero limit', params(), { limit: 0 }],
     ['a limit above the maximum', params(), { limit: 51 }],
     ['a fractional limit', params(), { limit: 1.5 }],

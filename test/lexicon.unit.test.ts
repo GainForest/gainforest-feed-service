@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 import { FeedErrorCode } from '../src/feed/errors.js'
-import { MAX_GROUP_ROWS } from '../src/feed/types.js'
+import { GROUP_SAMPLE_SIZE, MIN_GROUP_ROWS } from '../src/feed/types.js'
 import {
   $input as feedInput,
   $output as feedOutput,
@@ -50,7 +50,6 @@ const skeletonMain = objectAt(skeletonLexicon, 'defs', 'main')
 const feedMain = objectAt(feedLexicon, 'defs', 'main')
 const defs = objectAt(defsLexicon, 'defs')
 
-const viewerDid = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const actorDid = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
 const at = (collection: string, rkey: string): string =>
   `at://${actorDid}/${collection}/${rkey}`
@@ -61,7 +60,7 @@ const paramsType = 'app.gainforest.feed.defs#activityFeedParams'
 
 const feedRequest = {
   feedId,
-  params: { $type: paramsType, viewerDid, filter: 'post', following: true },
+  params: { $type: paramsType, filter: 'post' },
   limit: 20,
   cursor: 'next-page',
 }
@@ -83,28 +82,27 @@ const repostItem = {
   subject: at('app.gainforest.feed.post', 'p1'),
 }
 const groupKey = 'AAAAAAAAAAAAAAAAAAAAAA'
-const burstItem = {
-  $type: 'app.gainforest.feed.defs#burstItem',
+const observationGroup = {
+  $type: 'app.gainforest.feed.defs#groupItem',
+  kind: 'observation',
   did: actorDid,
-  total: MAX_GROUP_ROWS,
+  total: 3_100,
   from: '2026-07-21T09:00:00.000Z',
   to: createdAt,
   subjects: [at('app.gainforest.dwc.occurrence', 'o1')],
   groupKey,
-  continued: false,
-  capped: true,
+  more: true,
 }
-const audioItem = {
-  $type: 'app.gainforest.feed.defs#audioItem',
+const audioGroup = {
+  $type: 'app.gainforest.feed.defs#groupItem',
+  kind: 'audio',
   did: actorDid,
   deployment: at('app.gainforest.ac.deployment', 'folder'),
-  total: 40,
+  total: MIN_GROUP_ROWS,
   from: '2026-07-21T09:00:00.000Z',
   to: createdAt,
   subjects: [at('app.gainforest.ac.audio', 'a1')],
   groupKey,
-  continued: true,
-  capped: false,
 }
 
 const parseFeed = (feed: unknown[]) => feedOutput.schema.$parse({ feed })
@@ -148,14 +146,10 @@ describe('feed Lexicon contract', () => {
     }
   })
 
-  it('defines the activity feed parameters without pagination or author overrides', () => {
+  it('defines the activity feed parameters without pagination, author overrides, or a viewer', () => {
     const properties = objectAt(defs, 'activityFeedParams', 'properties')
 
-    expect(Object.keys(properties).sort()).toEqual([
-      'filter',
-      'following',
-      'viewerDid',
-    ])
+    expect(Object.keys(properties)).toEqual(['filter'])
     expect(valueAt(properties, 'filter', 'knownValues')).toEqual([
       'all',
       'project',
@@ -172,16 +166,37 @@ describe('feed Lexicon contract', () => {
       expect(valueAt(main, 'description')).toContain(
         'Omitting params selects the global feed.',
       )
+      expect(valueAt(main, 'description')).toContain(
+        'does not depend on the caller',
+      )
     }
     expect(valueAt(defs, 'activityFeedParams', 'description')).toContain(
-      'omits params gets the defaults',
+      'omits params gets the default filter',
     )
 
     const parsed = feedInput.schema.$parse({
       feedId,
       params: { $type: paramsType },
     })
-    expect(parsed.params).toMatchObject({ filter: 'all', following: false })
+    expect(parsed.params).toEqual({ $type: paramsType, filter: 'all' })
+  })
+
+  // The activity feed params object is open, like every Lexicon object: the
+  // router accepts a property it does not define, and the feed ignores it.
+  it('accepts properties the activity feed params do not define', () => {
+    for (const parser of [skeletonInput, feedInput]) {
+      expect(() =>
+        parser.schema.$parse({
+          feedId,
+          params: {
+            $type: paramsType,
+            filter: 'post',
+            following: true,
+            viewerDid: 'did:plc:ar7c4by46qjdydhdevvrndac',
+          },
+        }),
+      ).not.toThrow()
+    }
   })
 
   it('defines the skeleton as URI-only subjects', () => {
@@ -231,8 +246,7 @@ describe('feed Lexicon contract', () => {
       refs: [
         'app.gainforest.feed.defs#recordItem',
         'app.gainforest.feed.defs#repostItem',
-        'app.gainforest.feed.defs#burstItem',
-        'app.gainforest.feed.defs#audioItem',
+        'app.gainforest.feed.defs#groupItem',
       ],
     })
   })
@@ -247,7 +261,7 @@ describe('feed Lexicon contract', () => {
       'handle',
       'description',
     ]
-    for (const name of ['recordItem', 'repostItem', 'burstItem', 'audioItem']) {
+    for (const name of ['recordItem', 'repostItem', 'groupItem']) {
       const properties = Object.keys(objectAt(defs, name, 'properties'))
       for (const field of displayFields) {
         expect(properties).not.toContain(field)
@@ -257,7 +271,7 @@ describe('feed Lexicon contract', () => {
 
   it('accepts every item variant and the cursor', () => {
     const parsed = feedOutput.schema.$parse({
-      feed: [recordItem, repostItem, burstItem, audioItem],
+      feed: [recordItem, repostItem, observationGroup, audioGroup],
       cursor: 'next',
     })
 
@@ -265,33 +279,32 @@ describe('feed Lexicon contract', () => {
     expect(parsed.cursor).toBe('next')
   })
 
-  it('caps burst and audio items at the same number of rows as the service', () => {
-    for (const name of ['burstItem', 'audioItem']) {
-      expect(valueAt(defs, name, 'properties', 'total', 'maximum')).toBe(
-        MAX_GROUP_ROWS,
-      )
-    }
+  it('asks for the same minimum group size and sample size as the service', () => {
+    expect(valueAt(defs, 'groupItem', 'properties', 'total', 'minimum')).toBe(
+      MIN_GROUP_ROWS,
+    )
+    expect(
+      valueAt(defs, 'groupItem', 'properties', 'subjects', 'maxLength'),
+    ).toBe(GROUP_SAMPLE_SIZE)
   })
 
-  it.each([
-    ['a burst', burstItem],
-    ['an audio item', audioItem],
-  ])(
-    'applies false to the continued and capped flags of %s that omits them',
-    (_name, item) => {
-      const { continued: _continued, capped: _capped, ...withoutFlags } = item
-
-      expect(parseFeed([withoutFlags]).feed[0]).toMatchObject({
-        continued: false,
-        capped: false,
-      })
-    },
-  )
-
-  it('accepts a one-row continuation chunk of a burst', () => {
+  it('has no upper bound on the rows of a group, which a request’s row budget limits', () => {
+    expect(
+      valueAt(defs, 'groupItem', 'properties', 'total', 'maximum'),
+    ).toBeUndefined()
     expect(() =>
-      parseFeed([{ ...burstItem, total: 1, continued: true, capped: false }]),
+      parseFeed([{ ...observationGroup, total: 5_000 }]),
     ).not.toThrow()
+  })
+
+  it('leaves `more` out unless the service sets it, and accepts it either way', () => {
+    const { more: _more, ...withoutMore } = observationGroup
+
+    expect(parseFeed([withoutMore]).feed[0]).not.toHaveProperty('more')
+    expect(parseFeed([observationGroup]).feed[0]).toMatchObject({ more: true })
+    expect(
+      parseFeed([{ ...observationGroup, more: false }]).feed[0],
+    ).toMatchObject({ more: false })
   })
 
   it('accepts record and repost items without a cid', () => {
@@ -302,9 +315,24 @@ describe('feed Lexicon contract', () => {
   })
 
   it('accepts an audio group without a recorder folder', () => {
-    const { deployment: _deployment, ...withoutFolder } = audioItem
+    const { deployment: _deployment, ...withoutFolder } = audioGroup
 
     expect(() => parseFeed([withoutFolder])).not.toThrow()
+  })
+
+  it('accepts an audio recording as a record item', () => {
+    expect(() =>
+      parseFeed([
+        {
+          ...recordItem,
+          kind: 'audio',
+          uri: at('app.gainforest.ac.audio', 'a1'),
+        },
+      ]),
+    ).not.toThrow()
+    expect(
+      valueAt(defs, 'recordItem', 'properties', 'kind', 'knownValues'),
+    ).toContain('audio')
   })
 
   it('accepts unknown future item variants and unknown record kinds', () => {
@@ -321,42 +349,37 @@ describe('feed Lexicon contract', () => {
     ['a record with a malformed cid', { ...recordItem, cid: 'not-a-cid' }],
     ['a record owned by a non-DID', { ...recordItem, did: 'alice.test' }],
     ['a repost without its subject', { ...repostItem, subject: undefined }],
-    ['a burst of no observations', { ...burstItem, total: 0 }],
+    ['a group of no rows', { ...observationGroup, total: 0 }],
     [
-      'a burst larger than the cap',
-      { ...burstItem, total: MAX_GROUP_ROWS + 1 },
+      'a group of fewer rows than the minimum',
+      { ...observationGroup, total: MIN_GROUP_ROWS - 1 },
     ],
-    ['a burst without a group key', { ...burstItem, groupKey: undefined }],
-    ['a burst with an empty group key', { ...burstItem, groupKey: '' }],
+    ['a group without its kind', { ...observationGroup, kind: undefined }],
     [
-      'a burst with a group key that is too long',
-      { ...burstItem, groupKey: 'A'.repeat(65) },
+      'a group without a group key',
+      { ...observationGroup, groupKey: undefined },
+    ],
+    ['a group with an empty group key', { ...observationGroup, groupKey: '' }],
+    [
+      'a group with a group key that is too long',
+      { ...observationGroup, groupKey: 'A'.repeat(65) },
     ],
     [
-      'a burst with more than 20 samples',
+      'a group with more than 20 samples',
       {
-        ...burstItem,
-        subjects: Array.from({ length: 21 }, (_, index) =>
+        ...observationGroup,
+        subjects: Array.from({ length: GROUP_SAMPLE_SIZE + 1 }, (_, index) =>
           at('app.gainforest.dwc.occurrence', `o${String(index)}`),
         ),
       },
     ],
-    ['a burst without a time range', { ...burstItem, from: undefined }],
-    ['an audio item with no recordings', { ...audioItem, total: 0 }],
+    ['a group without a time range', { ...observationGroup, from: undefined }],
+    ['a group without its newest time', { ...observationGroup, to: undefined }],
+    ['a group owned by a non-DID', { ...observationGroup, did: 'alice.test' }],
     [
-      'an audio item larger than the cap',
-      { ...audioItem, total: MAX_GROUP_ROWS + 1 },
+      'an audio group with a folder that is not an AT-URI',
+      { ...audioGroup, deployment: 'not-a-uri' },
     ],
-    ['an audio item without its newest time', { ...audioItem, to: undefined }],
-    [
-      'an audio item without its oldest time',
-      { ...audioItem, from: undefined },
-    ],
-    [
-      'an audio item without a group key',
-      { ...audioItem, groupKey: undefined },
-    ],
-    ['an audio item with an empty group key', { ...audioItem, groupKey: '' }],
   ])('rejects %s', (_name, item) => {
     expect(() => parseFeed([item])).toThrow()
   })

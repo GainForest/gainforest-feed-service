@@ -28,13 +28,13 @@ export interface DatabaseCompatibilityChecker {
  *
  * - `default_transaction_read_only=on` is defense in depth next to the role's
  *   grants.
- * - `jit=off`: the feed statement hides its row bound from the planner
- *   (`LIMIT (SELECT $7)`, see the header of `feed/feed-query.sql`), so the
+ * - `jit=off`: the feed statement hides its row limit from the planner
+ *   (`LIMIT (SELECT $4)`, see the header of `feed/feed-query.sql`), so the
  *   planner assumes it reads a tenth of each collection and its estimated cost
- *   grows with the table: about 12,000 on 170,000 rows and about 95,000 on ten
- *   times that, close to the default `jit_above_cost` of 100,000. Above that
- *   PostgreSQL compiles the statement, which adds 100 to 150 ms to every page
- *   of a statement that runs in about 10 ms. JIT cannot help it.
+ *   grows with the table: about 2,200 on 170,000 rows. Past the default
+ *   `jit_above_cost` of 100,000, PostgreSQL would compile it, which adds 100
+ *   to 150 ms to every batch of a statement that runs in a few milliseconds.
+ *   JIT cannot help it, so no table size is allowed to start it.
  */
 const SESSION_OPTIONS = '-c default_transaction_read_only=on -c jit=off'
 

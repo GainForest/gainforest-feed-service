@@ -4,7 +4,7 @@ A standalone, read-only TypeScript service. It reads current [Hyperindex](https:
 
 **`getFeed` returns references and selection metadata, not records.** Each feed item names records by AT-URI and CID, and adds the account, timestamps, and group counts the service decided. It carries no titles, text, images, or profile data. GainForest hydrates the referenced records itself, through Hyperindex's GraphQL API.
 
-Hyperindex owns the PostgreSQL tables. The service does not ingest or change indexed data, call Hyperindex, PDS, or AppView APIs, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication; it never trusts a body viewer over the verified issuer.
+Hyperindex owns the PostgreSQL tables. The service does not ingest or change indexed data, call Hyperindex, PDS, or AppView APIs, write records, fetch blob bytes, or provide an unchangeable event history. Feed authentication is optional AT Protocol service authentication. The activity feed is the same for every caller, so a verified token changes nothing in the response.
 
 ## Endpoints
 
@@ -39,17 +39,15 @@ curl -sS http://localhost:3000/xrpc/app.gainforest.feed.getFeed \
 
 The activity feed (`app.gainforest.feed.defs#activityFeed`) takes `app.gainforest.feed.defs#activityFeedParams`:
 
-| Param       | Default | Meaning                                                                                                                                                                             |
-| ----------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `filter`    | `all`   | `all`, `project`, `observation`, `organization`, `post`, or `audio`. Reposts appear only with `all`.                                                                                |
-| `following` | `false` | Limit the feed to accounts the viewer follows through `app.certified.graph.follow` records. Reposts are scoped to the account that reposted, and audio groups to the group's owner. |
-| `viewerDid` | none    | The viewer whose follows apply. Required for anonymous requests that set `following`.                                                                                               |
+| Param    | Default | Meaning                                                                                              |
+| -------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `filter` | `all`   | `all`, `project`, `observation`, `organization`, `post`, or `audio`. Reposts appear only with `all`. |
 
-The anonymous global feed needs no viewer. A service caller may add `-H 'authorization: Bearer <service-auth-jwt>'`; the token must target the bare DID configured as `SERVICE_DID`, carry the exact endpoint NSID in `lxm`, and be signed by the issuer's `#atproto` key. The verified issuer is then the viewer, and a supplied `viewerDid` must equal it. Invalid supplied authorization returns 401 and is never treated as anonymous.
+**The feed does not depend on the caller.** Every caller gets the same page for the same request, so the feed needs no login and a verified token changes nothing in the response. A service caller may still add `-H 'authorization: Bearer <service-auth-jwt>'`. The service verifies it: the token must target the bare DID configured as `SERVICE_DID`, carry the exact endpoint NSID in `lxm`, and be signed by the issuer's `#atproto` key. The verifier stays for the planned following feed (see [Planned](#planned)). Invalid supplied authorization returns 401 and is never treated as anonymous.
 
-`params` is optional for this feed. Omitting it means the defaults, `filter` `all` and `following` false, so a request with only a `feedId` returns the global feed. A mismatched `$type` returns `InvalidRequest`, while an unknown `feedId` returns `UnsupportedFeed`. The public params union is open for future feed algorithms.
+`params` is optional for this feed. Omitting it means the default, `filter` `all`, so a request with only a `feedId` returns the global feed. `params` holds only `filter`: a property it does not define, such as `following` or `viewerDid`, is ignored, so a request that sets one gets the global feed. A mismatched `$type` returns `InvalidRequest`, while an unknown `feedId` returns `UnsupportedFeed`. The public params union is open for future feed algorithms.
 
-`limit` counts feed items, from 1 to 50 (default 20). A burst or an audio run is one item per 200 rows: a longer run continues in the items that follow it (see [Groups and chunks](#groups-and-chunks)). Send a returned cursor back as the top-level request `cursor`, never inside `params`.
+`limit` counts the cards a page is built from, from 1 to 50 (default 20). A group is one card, but a group of fewer than 3 rows is returned as separate records, so a page holds between `limit` and `2 × limit` items, and fewer when the end of the data or the request's row budget ends it first (see [Groups](#groups)). Send a returned cursor back as the top-level request `cursor`, never inside `params`.
 
 ### getFeed response
 
@@ -65,42 +63,42 @@ The anonymous global feed needs no viewer. A service caller may add `-H 'authori
       "createdAt": "2026-07-21T10:00:00.000000Z"
     },
     {
-      "$type": "app.gainforest.feed.defs#burstItem",
+      "$type": "app.gainforest.feed.defs#groupItem",
+      "kind": "observation",
       "did": "did:plc:ar7c4by46qjdydhdevvrndac",
-      "total": 200,
+      "groupKey": "dM_zftW-fmKtVG8r55HKNZ",
+      "total": 214,
       "from": "2026-07-21T07:12:09.114000Z",
       "to": "2026-07-21T09:48:31.502000Z",
-      "subjects": ["at://did:plc:ar7c4by46qjdydhdevvrndac/app.gainforest.dwc.occurrence/3kpm"],
-      "groupKey": "dM_zftW-fmKtVG8r55HKNZ",
-      "continued": false,
-      "capped": true
+      "subjects": ["at://did:plc:ar7c4by46qjdydhdevvrndac/app.gainforest.dwc.occurrence/3kpm"]
     }
   ],
-  "cursor": "eyJ2ZXJzaW9uIjoyLCJmZWVkSWQiOi..."
+  "cursor": "eyJ2ZXJzaW9uIjozLCJmZWVkSWQiOi..."
 }
 ```
 
 The `feed` array is an open union. Clients must tolerate item types they do not know. The current items are:
 
-- `recordItem`: one `project`, `observation`, `organization`, or `post` record (`kind`, `uri`, `did`, `createdAt`, and the `cid` when Hyperindex has stored one).
+- `recordItem`: one `project`, `observation`, `organization`, `post`, or `audio` record (`kind`, `uri`, `did`, `createdAt`, and the `cid` when Hyperindex has stored one). An observation or a recording is a `recordItem` when it is not part of a group.
 - `repostItem`: an `app.gainforest.feed.repost` record (`uri`, `did`, `createdAt`, and the `cid` when stored) and the AT-URI of the record it reposts (`subject`). The item is ordered by the repost's time.
-- `burstItem`: one chunk of a run of observations by one account that are adjacent in the feed with no gap over 12 hours. It carries the account (`did`), `total` (the observations in this item, at most 200), the oldest and newest `createdAt` of the item (`from`, `to`), up to 20 sample observation URIs in `subjects`, newest first, and the group fields `groupKey`, `continued`, and `capped`. A single observation stays a `recordItem`.
-- `audioItem`: one chunk of a run of recordings in one recorder folder that are adjacent in the feed with no gap over 12 hours, whoever stored them; a recording without a folder is grouped by its own account. It carries the run's owner (`did`: the account in the folder's AT-URI, or the recording's own account when there is no folder), the optional `deployment` AT-URI of the folder (omitted when the recording's `deploymentRef` is not a valid AT-URI), `total` (the recordings in this item, at most 200), `from`, `to`, up to 20 sample recording URIs in `subjects`, newest first, and the group fields. A single recording is an `audioItem` with `total` 1.
+- `groupItem`: at least 3 observations by one account (`kind` `observation`) or recordings in one recorder folder (`kind` `audio`), folded into one card. It carries `kind`, the group's owner (`did`: the account of the observations, or the account in the folder's AT-URI, or the recording's own account when it has no folder), the optional `deployment` AT-URI of the folder (audio only, omitted when the recording's `deploymentRef` is not a valid AT-URI), the stable `groupKey`, `total` (the rows in this card), the oldest and newest `createdAt` (`from`, `to`), up to 20 sample URIs in `subjects`, newest first, and `more` when the request's row budget ended the page while a later row could still join this card (see [Groups](#groups)).
 
-Items are ordered newest first by the record's own `createdAt`, as Hyperindex materializes it in `record_created_at`, then by URI. A group item takes the time of its newest member (`to`).
+Items are ordered newest first by the record's own `createdAt`, as Hyperindex materializes it in `record_created_at`, then by URI. A group card takes the time of its newest row (`to`).
 
-### Groups and chunks
+### Groups
 
-A burst or an audio run can be thousands of rows long, so **one item covers at most 200 rows**. A longer run is returned as consecutive chunk items, newest first: a run of 450 observations is three `burstItem`s of 200, 200, and 50. The chunks of one run carry these fields:
+The page folds rows into cards the way the GainForest app does on the client, moved into the service and made independent of the rows around a group:
 
-- `groupKey` is the same on every chunk of one run and different for every other run. Treat it as opaque. It is stable only within one paging walk: the service derives it from the run's newest record, so it changes when a newer record joins the run. Do not keep it as a long-lived identity across refreshes.
-- `continued` is true on every chunk after the first one. It is true across pages too: the cursor names the run the page cut, so the first item of the next page continues it without the service reading backwards.
-- `capped` is true when the chunk is full and the run goes on in the next item. A run of exactly 200 rows is not capped; a run of 201 is a chunk of 200 (`capped`) and a chunk of 1 (`continued`). Results are current state, not a snapshot, so a `capped` chunk is not guaranteed to be followed by a page whose first item is `continued`: a write between two requests (the record the cursor points at being deleted, for example) can break the continuation. Treat `continued` as the authority.
-- `total` counts the rows of this item, not of the whole run.
+- **A group** is the observations of one account, or the recordings of one owner and recorder folder. Bioacoustic sightings, reposts, posts, projects, and organizations never group.
+- **A row joins its group's open card** when it is no more than 12 hours older than the card's oldest row so far. Rows of other kinds, accounts, or folders between them do not matter, so two recorders that upload at the same time give one card each. A row further away starts a new card, and the old one is closed.
+- **A group needs 3 rows.** A card of one or two rows is returned as separate records, each at the position of its own row.
+- **A card sits at its newest row**, and every consumed row is in exactly one item.
+- **`limit` counts cards** while the page is built. The page takes rows until the next one would start a card beyond `limit`; rows that join an open card are always taken. A page holds between `limit` and `2 × limit` items.
+- **A request consumes at most 5,000 rows**, and reads them in statements of 500, so it runs at most 10 statements. A page that reaches the 5,000 rows ends there, always has a cursor, and says `more: true` on a group card that a later row can still join: its group's latest card, when the page's last row is within 12 hours of the card's oldest row.
 
-**Clients merge chunks.** Put every item with `continued: true` into the card of the previous group item, which has the same `groupKey`, add its `total` to the card's, and show "200+" while the last chunk you have is `capped`. The single row left over after a full chunk is still a group item (`burstItem` or `audioItem` with `total` 1 and `continued` true), never a `recordItem`, so the rule has no exception.
+The cursor is the last consumed row and nothing else. The service keeps no state between requests, so a group whose rows continue on the next page comes back there as another card with **the same `groupKey`**. `groupKey` is a stable hash of the group's kind, owner, and folder, so it is the same on every page and in every request. Treat it as opaque; two cards of one group, split by a gap of more than 12 hours, share it too.
 
-Counts are capped because an exact count needs the whole run, and one bounded statement cannot read a run of unbounded length. With the cap, every page reads at most `limit × 200 + 1` rows in one statement.
+**Clients merge cards across pages.** Keep the last card shown for each `groupKey`. When a later card has the same `groupKey` and its `to` is no more than 12 hours before that card's `from`, merge it into that card: add its `total`, take its `from` and its `more`, and append its `subjects`. Otherwise it is a new card, and it becomes the last card for that key. Most merging happens inside the service, so the rule matters only at page edges and for groups longer than the row budget. **The absence of `more` does not mean that a group is complete:** a group also continues after a page that ended for another reason, so always merge by `groupKey` and the 12-hour rule, never by `more`. A continuation of fewer than 3 rows comes back as separate records, which are not merged.
 
 ### getFeedSkeleton response
 
@@ -109,11 +107,11 @@ Counts are capped because an exact count needs the whole run, and one bounded st
   "feed": [
     { "subject": "at://did:plc:ewvi7nxzyoun6zhxrhs64oiz/app.gainforest.feed.post/3kpn" }
   ],
-  "cursor": "eyJ2ZXJzaW9uIjoyLCJmZWVkSWQiOi..."
+  "cursor": "eyJ2ZXJzaW9uIjozLCJmZWVkSWQiOi..."
 }
 ```
 
-`getFeedSkeleton` runs the same selection and returns the same cursor as `getFeed`, flattened to AT-URIs in feed order. A repost yields the repost record's URI. A burst or audio chunk yields its sample URIs. A skeleton page can therefore hold more entries than its `limit`, up to 20 per grouped item.
+`getFeedSkeleton` builds the same pages and returns the same cursor as `getFeed`, flattened to AT-URIs in item order: the order of the items `getFeed` returns, with all rows of a group listed together, newest first, at the group's position. A repost yields the repost record's URI, and a group yields the URI of **every** row it covers. The skeleton therefore lists each row the page consumed exactly once, but it is not a feed-ordered sequence: a group's later members come before the rows that lie between them in the feed. A skeleton page can therefore hold many more entries than its `limit`, up to the 5,000 rows one request consumes.
 
 #### What the service does not do
 
@@ -137,11 +135,12 @@ sequenceDiagram
     HTTP->>XRPC: Bounded, validated JSON
     XRPC->>XRPC: Verify audience, expiry, lxm, #atproto signature
     XRPC->>XRPC: Validate and consume issuer-scoped jti
-    XRPC->>Service: Endpoint input + trusted viewer DID
+    XRPC->>Service: Endpoint input (the verified caller is not passed on)
     Service->>Registry: Load page
     Registry->>Feed: Dispatch feedId, params, and pagination
-    Feed->>DB: One feed statement per page
-    DB-->>Feed: Items, chunk sizes, samples
+    Feed->>DB: Batches of 500 rows, at most 10 statements
+    DB-->>Feed: Rows: kind, uri, cid, account, time, folder, sighting flag
+    Feed->>Feed: Fold rows into cards (groups, limit, row budget)
     Feed-->>Registry: Selected items and feed-scoped cursor
     Registry-->>Service: Page
     Service-->>XRPC: References and metadata (getFeed) or flattened URIs (getFeedSkeleton)
@@ -151,7 +150,7 @@ sequenceDiagram
 
 ## Request behavior
 
-- Malformed JSON, anonymous requests that set `following` without `params.viewerDid`, an authenticated supplied viewer mismatch, an invalid `viewerDid`, params that do not match the selected feed, or structurally invalid top-level pagination return HTTP 400 with `InvalidRequest`. A `limit` below 1 is rejected by the Lexicon schema and returns HTTP 400 with `InvalidRequest`. Semantically invalid parameters (an unknown `filter`, a `limit` above 50) return HTTP 422 with the same generic error name and an actionable message. An unregistered `feedId` returns `UnsupportedFeed`. These never become internal server errors.
+- Malformed JSON, params that do not match the selected feed, or structurally invalid top-level pagination return HTTP 400 with `InvalidRequest`. A `limit` below 1 is rejected by the Lexicon schema and returns HTTP 400 with `InvalidRequest`. Semantically invalid parameters (an unknown `filter`, a `limit` above 50) return HTTP 422 with the same generic error name and an actionable message. An unregistered `feedId` returns `UnsupportedFeed`. These never become internal server errors.
 - A present `Authorization` header is always verified. Malformed, expired, not-yet-valid, wrong-audience, wrong-endpoint, unresolved-issuer, or incorrectly signed service JWTs return HTTP 401; the request is never retried anonymously. DID documents are resolved over bounded HTTPS-only requests with direct public-address pinning; `did:web` redirects and private, loopback, link-local, reserved, and special-use destinations are rejected.
 - Service-auth JWTs must include a signed, non-empty `jti` no larger than 256 UTF-8 bytes. After signature, audience, expiry, and exact endpoint checks succeed, the service accepts each issuer-and-`jti` pair once. A token is consumed before the downstream feed request runs, so retries require a fresh token even when feed generation fails. Replay state is bounded to 512 live entries per verified issuer and 4,096 live entries total, local to the running process, cleared on restart, and not shared between replicas; a full live issuer quota or global store returns HTTP 503 until entries expire. Anonymous requests remain unaffected because they do not use service-auth replay state.
 
@@ -163,16 +162,21 @@ sequenceDiagram
 
 - The feed reads only rows Hyperindex marks `validation_status = 'valid'`, the rows its typed GraphQL collections return. It excludes rows whose `createdAt` Hyperindex could not parse, and rows whose `createdAt` is before 1970 or more than five minutes in the future. `createdAt` is client-declared: a year-10000 record cannot be formatted as a datetime, and a record dated 2099 would otherwise sit at the top of the feed for good.
 - Projects are `org.hypercerts.collection` records typed `project` or `Project`. Observations are `app.gainforest.dwc.occurrence`. Organizations are `app.certified.actor.organization`. Posts are top-level `app.gainforest.feed.post` records without a `community-event` tag. Reposts are `app.gainforest.feed.repost` records whose subject still exists as a valid observation, as a project typed `project` or `Project`, or as a top-level post without a `community-event` tag, owned by another account. Audio is `app.gainforest.ac.audio`.
-- **"Consecutive" means adjacent in the merged feed order.** Any row between two observations ends a burst, whether it is another kind or another account's observation, and any row between two recordings ends an audio run in the same way. With the `observation` filter only observations are in the order, and with `audio` only recordings. This matches how the GainForest app groups observations today, except that a burst needs two observations, where the app currently needs three. Bioacoustic sightings never join a burst.
-- Audio runs are recordings that are adjacent in the feed with no gap over 12 hours and the same owner and folder. A recording that names a recorder folder (`deploymentRef` is an AT-URI) belongs to that folder, and the account in the folder's AT-URI owns the run, whoever stored the recording. A recording without a folder, or whose folder names a handle (or anything else that is not a valid DID) instead of a DID, belongs to its own account. The `following` scope applies to the owner. Because a run needs adjacency, two recorders that upload into different folders at the same time interrupt each other and make many short items; the service no longer groups by upload day.
-- The cursor is unpadded base64url JSON with a version, scoped to the feed. It points at the last row the previous page consumed, which for a chunk is its oldest member, so no row repeats and none is skipped. When the page's last chunk was cut at 200 rows, the cursor also names that run by its `groupKey` and kind, so the next page continues it; the run's account and folder are read from the database, never from the cursor. The cursor is an unsigned token held by the client: the service uses it only to position that client's own page. A cursor whose timestamp is not a real date, or that an earlier version issued, is rejected with `InvalidCursor`: request the first page again.
+- **Grouping ignores the rows around a group.** Observations of one account and recordings of one owner and folder fold into one card whatever other rows lie between them, as long as each is within 12 hours of the group's previous row. A group of fewer than 3 rows is returned as separate records. Bioacoustic sightings never group.
+- Audio groups are keyed by owner and folder. A recording that names a recorder folder (`deploymentRef` is an AT-URI) belongs to that folder, and the account in the folder's AT-URI owns the group, whoever stored the recording. A recording without a folder, or whose folder names a handle (or anything else that is not a valid DID) instead of a DID, belongs to its own account. A recording that is not part of a group is a `recordItem` of kind `audio` and names the account that stored it.
+- The cursor is unpadded base64url JSON with a version, scoped to the feed. It points at the last row the previous page consumed and holds nothing a record controls. It is an unsigned token held by the client: the service uses it only to position that client's own page. A cursor whose timestamp is not a real date, or that an earlier version issued, is rejected with `InvalidCursor`: request the first page again.
 - Results are mutable current state, not a snapshot across requests.
 
 ### Pagination and database reads
 
-- A page is selected by one SQL statement. Every item covers at most 200 rows, so a page of `limit` items needs at most `limit × 200` rows of the merged feed order, plus the first row of the next item, which shows that a next page exists and whether the last chunk continues. The statement reads rows only as it needs them: an ordinary page reads a few hundred rows, and only a page made of full chunks reads all `limit × 200 + 1`. There is no retry with a wider window and no error for a long run.
+- A page is built from batches of 500 rows, newest first, after the cursor. Most requests need one statement. A request that folds a long dump needs one per 500 rows it consumes, never more than 10, so it never consumes more than 5,000 rows. A statement is a plain read of those rows; grouping happens in the service.
+- A statement that exceeds the database statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`) is an outage and returns `InternalError`. A request is bounded by 10 of them.
 - The service never makes extra queries to hydrate or refill items.
 - Each page is a separate database read. Changes made between requests may appear on later pages.
+
+### Planned
+
+**A separate following feed.** Following is not part of `activityFeed` and not part of this release. It is planned as its own feed id (`#followingFeed`) with its own params definition in the `params` open union, and a follow-driven query: it starts from the followed accounts and reads them through the author index (`idx_record_timeline_author_collection_created`) instead of walking each collection. Audio ownership through the recorder folder still has to be handled for that query, because a recording's owner is the folder's owner, not the account that stored it (see [`docs/database-contract.md`](docs/database-contract.md)).
 
 ## Runtime configuration
 
@@ -202,7 +206,7 @@ Service-auth audience verification currently accepts only the bare `SERVICE_DID`
 
 ## Database access
 
-Use a dedicated login that has only `SELECT` access to `record`. The service also sets `default_transaction_read_only=on` for every connection in the pool, but database grants are still the main security boundary. It sets `jit=off` as well: the feed statement runs in about 10 ms, and PostgreSQL's just-in-time compilation would only add latency once the table is large enough for the planner's cost estimate to cross `jit_above_cost`.
+Use a dedicated login that has only `SELECT` access to `record`. The service also sets `default_transaction_read_only=on` for every connection in the pool, but database grants are still the main security boundary. It sets `jit=off` as well: the feed statement runs in a few milliseconds, and PostgreSQL's just-in-time compilation would only add latency once the table is large enough for the planner's cost estimate to cross `jit_above_cost`.
 
 Each service replica has its own limited in-process pool. When planning database connections, allow for `replica count × DATABASE_MAX_CONNECTIONS`. Use an external pooler if many replicas share a PostgreSQL server with few available connections.
 
@@ -233,7 +237,7 @@ npm run build
 
 The committed project Lexicons in `lexicons/` define the public wire contract. The generated TypeScript in `src/lexicons/` is ignored. Do not edit or commit it. The `codegen`, `check`, test, and build commands regenerate it; `npm run lint` also does so through its `prelint` hook before typed linting. `npm run lint:fix` applies ESLint autofixes, and `npm run format` formats maintained TypeScript, MJS, Markdown, YAML, project configuration, and the project-owned feed Lexicons. Generated output and release changelogs are excluded. `AGENTS.md` explains a small, focused workaround for the current `@atproto/lex` generator output that runs after codegen.
 
-The feed statement is `src/feed/feed-query.sql`. `src/feed/query.ts` registers the activity feed, binds the statement, and turns its rows into items and the cursor's open run, while `src/feed/registry.ts` and `src/feed/sql-feed.ts` own dispatch and shared SQL-feed policy. During development, the watcher watches the SQL along with the TypeScript source. The build copies it next to `dist/feed/query.js` before checking that the production adapters load.
+The feed statement is `src/feed/feed-query.sql`, a plain read of the next rows. `src/feed/query.ts` registers the activity feed and runs the loop that fetches batches until the page is built, `src/feed/page-builder.ts` folds the rows into cards, and `src/feed/registry.ts` and `src/feed/sql-feed.ts` own dispatch and shared SQL-feed policy. During development, the watcher watches the SQL along with the TypeScript source. The build copies it next to `dist/feed/query.js` before checking that the production adapters load.
 
 ### PostgreSQL integration tests
 
@@ -305,7 +309,7 @@ InternalError
 
 Feed-specific parameter failures use `InvalidRequest`; their message identifies the invalid parameter and how to correct it.
 
-A feed statement that exceeds the database statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`, 5 seconds by default) is an outage, not a long run, and returns `InternalError`.
+A feed statement that exceeds the database statement timeout (`DATABASE_STATEMENT_TIMEOUT_MS`, 5 seconds by default) is an outage, not a long group, and returns `InternalError`.
 
 Public errors never show SQL, database credentials, table contents, internal causes, or stack traces.
 

@@ -26,6 +26,7 @@ const page: FeedPage = {
       createdAt: '2026-07-21T10:00:00.000Z',
     },
   ],
+  uris: [`at://${did}/app.gainforest.feed.post/3kpn`],
 }
 
 class FakeRegisteredFeed implements RegisteredFeed {

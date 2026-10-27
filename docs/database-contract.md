@@ -23,7 +23,7 @@ record.record_created_at   timestamptz, nullable   (migration 010)
 record.validation_status   text, not null          (migration 012)
 ```
 
-The canonical migrations are the files in `internal/database/migrations/postgres` in the Hyperindex repository (001 through 014 on `main` at the time of writing). The older `db/migrations_postgres` directory stops at migration 004 and is not what Hyperindex applies. The service needs exactly two of them: **migration 010** for `record_created_at` and its timeline indexes, and **migration 012** for `validation_status`. Its queries also rely on `idx_record_did_collection` from migration 001. Later migrations are not required.
+The canonical migrations are the files in `internal/database/migrations/postgres` in the Hyperindex repository (001 through 014 on `main` at the time of writing). The older `db/migrations_postgres` directory stops at migration 004 and is not what Hyperindex applies. The service needs exactly two of them: **migration 010** for `record_created_at` and its timeline indexes, and **migration 012** for `validation_status`. Later migrations are not required.
 
 The service does not read `actor`, `label`, or any other Hyperindex table, and it does not read handles.
 
@@ -53,20 +53,18 @@ Hyperindex's ingestion accepts events that carry no CID (`internal/database/repo
 
 The kinds, by collection:
 
-| Item                                     | Collection                         | Extra rules                                                                                                                                                                                                         |
-| ---------------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `recordItem` `project`                   | `org.hypercerts.collection`        | `json->>'type'` is `project` or `Project`                                                                                                                                                                           |
-| `recordItem` `organization`              | `app.certified.actor.organization` | None. The app still filters organizations with its private ledger.                                                                                                                                                  |
-| `recordItem` `post`                      | `app.gainforest.feed.post`         | No `reply`, and no `community-event` tag                                                                                                                                                                            |
-| `recordItem` `observation` / `burstItem` | `app.gainforest.dwc.occurrence`    | None. See bursts and chunks.                                                                                                                                                                                        |
-| `repostItem`                             | `app.gainforest.feed.repost`       | Only in the `all` filter. The subject must exist, be valid, and be owned by another account, as an observation, a project typed `project` or `Project`, or a top-level post (no `reply`, no `community-event` tag). |
-| `audioItem`                              | `app.gainforest.ac.audio`          | Runs of adjacent recordings, see audio runs.                                                                                                                                                                        |
+| Item                                       | Collection                         | Extra rules                                                                                                                                                                                                         |
+| ------------------------------------------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `recordItem` `project`                     | `org.hypercerts.collection`        | `json->>'type'` is `project` or `Project`                                                                                                                                                                           |
+| `recordItem` `organization`                | `app.certified.actor.organization` | None. The app still filters organizations with its private ledger.                                                                                                                                                  |
+| `recordItem` `post`                        | `app.gainforest.feed.post`         | No `reply`, and no `community-event` tag                                                                                                                                                                            |
+| `recordItem` `observation`, or `groupItem` | `app.gainforest.dwc.occurrence`    | None. Observations of one account fold into groups, see groups.                                                                                                                                                     |
+| `repostItem`                               | `app.gainforest.feed.repost`       | Only in the `all` filter. The subject must exist, be valid, and be owned by another account, as an observation, a project typed `project` or `Project`, or a top-level post (no `reply`, no `community-event` tag). |
+| `recordItem` `audio`, or `groupItem`       | `app.gainforest.ac.audio`          | Recordings of one owner and folder fold into groups, see groups.                                                                                                                                                    |
 
 Donations (`org.hypercerts.funding.receipt`) and every other collection are never selected.
 
-### Following
-
-With `following: true`, rows are limited to accounts the viewer follows: the distinct `json->>'subject'` of the viewer's valid `app.certified.graph.follow` records (`did = viewer`). Posts, projects, observations, and organizations are scoped by the record owner. Reposts are scoped by the reposter. Audio runs are scoped by the run's owner, which is the folder's owner when the recordings name a folder, not necessarily the account that stored the recording. A viewer who follows nobody gets an empty page, and the statement answers it without reading a feed collection: every arm begins with `NOT following OR EXISTS (follows)`, which PostgreSQL evaluates once as a one-time filter, so none of the six arms runs. Without that guard each arm walked its whole collection looking for rows that nothing could pass (about 100 ms on the evidence data below, 1.4 to 1.8 s on a table ten times as large).
+**Selection does not depend on the caller.** The statement takes the active kinds, the cursor position, and the batch size, and nothing that identifies who asks: no viewer, no follow records, no owner scope. Every caller gets the same rows for the same request, with or without a service-auth token. Following is planned as a separate feed (see the follow-ups below).
 
 ### Order and cursor
 
@@ -76,37 +74,37 @@ Feed order is:
 record_created_at DESC, uri DESC
 ```
 
-`record_created_at` has millisecond precision and Hyperindex never overwrites a non-null value on update. Ties break by `uri`, compared with the database collation. Cursor version 2 is unpadded base64url JSON containing exactly `{ version: 2, feedId, value: { value, uri, group? } }`. It is scoped to the selected feed. `value` and `uri` are the position of the last row the previous page consumed, and the next page selects rows strictly after it. A chunk consumes all of its rows, so the cursor points at the chunk's oldest row and the next page begins with the first row after it. `group` is exactly `{ key, kind }` (`kind` is `observation` or `audio`). It is present only when the page's last chunk was cut at the 200-row cap and the run goes on, and it names that run so the next page can continue it. It carries nothing a record controls: the statement reads the run's account and folder from the cursor row in the database (see chunks), so a cursor cannot outgrow the 4,096 characters the response allows, whatever a record stores. The cursor is an unsigned token held by the client, so the service trusts it only to position that client's own page. A `value` that is a valid RFC 3339 datetime but that PostgreSQL cannot cast, namely a day the month does not have (`2026-02-30`), year 0000, or a UTC offset beyond ±15:59, is rejected as `InvalidCursor` when the cursor is decoded. Version 1 cursors are rejected with `InvalidCursor`. Pagination is deterministic for each query but is not a snapshot across requests.
+`record_created_at` has millisecond precision and Hyperindex never overwrites a non-null value on update. Ties break by `uri`, compared with the database collation.
+
+The cursor is unpadded base64url JSON, scoped to the selected feed: exactly `{ version: 3, feedId, value: { value, uri } }`. `value` and `uri` are the last row the previous page consumed, and the next page selects rows strictly after it. Nothing a record controls is in the cursor, so no record can make it outgrow the 4,096 characters the response allows. The cursor is an unsigned token held by the client, so the service trusts it only to position that client's own page. A `value` that is a valid RFC 3339 datetime but that PostgreSQL cannot cast, namely a day the month does not have (`2026-02-30`), year 0000, or a UTC offset beyond ±15:59, is rejected as `InvalidCursor` when the cursor is decoded. Cursors of versions 1 and 2 are rejected with `InvalidCursor`; clients request the first page again. Pagination is deterministic for each query but is not a snapshot across requests.
 
 ### Dates
 
 `createdAt` is client-declared, so the feed reads only rows with `record_created_at` from 1970-01-01T00:00:00Z up to five minutes after the statement's `now()`. Hyperindex accepts any datetime Indigo parses, so a valid record dated `9999-12-31T23:59:59-05:00` is stored as year 10000, which PostgreSQL accepts but which is not a valid datetime on the wire; one such row would fail every page that includes its kind. A record dated far in the future would otherwise stay at the top of the feed forever. Rows outside the range are ignored until their time arrives. Every read of `record` in the statement applies the same range, written out as literals so the planner can still walk the timeline index in order.
 
-### Bursts and audio runs
+### Rows, groups, and pages
 
-Rows that are adjacent in the merged feed order form one run when they have the same kind and key and no more than 12 hours separate neighbours (a gap of exactly 12 hours joins them). A row of any other kind, or with another key, ends the run.
+**The statement is a plain read.** It returns the next 500 selectable rows after the cursor, newest first, and nothing else: no grouping, counting, or cutting. Each row is `kind`, `uri`, `cid`, `did`, the formatted `record_created_at`, and what the page builder needs to group it: for audio the folder (`deploymentRef` when it is an AT-URI) and its owner, for observations whether it is a bioacoustic sighting, and for reposts the subject.
 
-- **Bursts** are observations keyed by account (`did`). A bioacoustic sighting never joins a burst: an observation whose `dynamicProperties` text parses to a `gainforestBioacoustics` sidecar with version 1, a source audio URI that appears in `associatedMedia`, a known label category, and numeric time and frequency bounds. Those sightings are shown on their own. A run of one observation stays a `recordItem`. The minimum run length is 2, which is `MIN_BATCH` 3 in the GainForest app's current client-side grouping, so the app should expect two-observation bursts.
-- **Audio runs** are recordings keyed by owner and folder. A recording whose `deploymentRef` is an AT-URI belongs to that recorder folder, and the folder's owner, the account in the AT-URI, owns the run whoever stored the recording. A recording without a folder belongs to its own account. If the authority of the AT-URI is not a valid DID, because it is a handle or anything else, the recording also falls back to its own account, because `audioItem.did` must be a DID. A valid DID here is the shape the Lexicon's `did` format accepts: `did:method:id`, a lowercase method, the characters `A-Z a-z 0-9 . _ : % -`, no trailing `:` or `%`, at most 2,048 characters. The item names the folder in `audioItem.deployment` only when `deploymentRef` is a valid AT-URI, by the strict `isAtUriString` test, which is also what the output check of `format: at-uri` applies. For any other value (`at://did:/x`, a trailing slash, a query, a path that is not a collection and a key) `deployment` is omitted and the recordings still group by the raw `deploymentRef`, with the owner rule above. One malformed `deploymentRef` therefore cannot fail the page that holds it; before, it answered 500 on every `getFeed` page with that recording. A single recording is an `audioItem` with a total of 1. The service no longer groups by upload day: an exact day group needed the whole day, and one recorder's 1,700 files made the statement read the same recordings again and again. Two recorders uploading into different folders at the same time interrupt each other, so interleaved uploads make many short items. The app also looks the folder up and falls back to the recording's account when the folder record is missing; the service reads the owner from the AT-URI and does not look the folder up.
+**The page is built in TypeScript.** `src/feed/query.ts` fetches batches and `src/feed/page-builder.ts` folds their rows into cards, newest first:
 
-"Adjacent" follows the active filter. With the `observation` filter only observations are in the order, so another account's observation still ends a burst, but a post does not. With the `audio` filter only recordings are.
+- A **group** is the audio recordings of one owner and folder, or the observations of one account. Bioacoustic sightings, reposts, posts, projects, and organizations never group; each is its own card.
+- A row of a group **joins the group's open card** when it is no more than 12 hours older than that card's oldest row so far (a gap of exactly 12 hours joins). Other rows between them, of any kind, account, or folder, change nothing. A row further away starts a new card for the group and closes the old one. Two cards of one group can therefore share a page.
+- A card is placed at its newest row. A group card of **at least 3 rows** is a `groupItem`: `total`, `from`, `to`, up to 20 sample URIs, and the `groupKey`. A card of fewer rows is returned as separate `recordItem`s, each at its own row's position, so groups of one or two rows look exactly like the rows around them.
+- The page takes `limit` cards. It stops at the first row that would start another card, at the end of the data, or after the request has consumed 5,000 rows. Rows that join an open card are taken even when the page has its `limit` cards, so one page can cover a whole dump.
+- Every consumed row is in exactly one item, and the cursor is the last consumed row, so no row repeats and none is skipped.
 
-### Chunks
+**`limit` counts cards while the page is built.** A group that ends with fewer than 3 rows becomes up to 2 records, so a page holds between `limit` and `2 × limit` items. It holds fewer when the end of the data or the row budget stops it first. This is documented in the Lexicon, because a client that sizes its screen by `limit` sees it.
 
-One item covers at most 200 rows (`MAX_GROUP_ROWS`). A longer run is cut into chunks of 200 rows, newest first, counted from the run's first row:
+**The row budget.** A request consumes at most 5,000 rows, which is at most 10 statements of 500 rows. When the budget ends a page, the page always has a cursor (it cannot know that no row remains, so the next page is empty when the data ended exactly there), and a group card says `more: true` when a later row can still join it: it is its group's latest card, and the page's last consumed row is within 12 hours of the card's oldest row. A card whose group has gone quiet for more than 12 hours before the page ended cannot be continued, so it does not say `more`.
 
-- every chunk after the first has `continued`;
-- a chunk that is full and followed by another row of the same run is `capped`: a run of exactly 200 rows is one uncapped chunk, and a run of 201 is a chunk of 200 (`capped`) and a chunk of 1 (`continued`);
-- every chunk of one run carries the same opaque `groupKey`, derived from the run's newest record, and no two runs share one. It is stable only within one paging walk: it changes when a newer record joins the run, so clients must not keep it as a long-lived identity across refreshes;
-- an item's `total`, `from`, `to`, and up to 20 sample URIs describe that chunk only.
+**A group can continue on the next page.** The page builder keeps no state between requests, so the continuation of a group comes back as another card with the same `groupKey`. The `groupKey` is a stable hash of the group's kind, owner, and folder: it names the group and is the same on every page and in every request. A client merges a later card into an earlier one by the rule the Lexicon documents on `groupItem`: keep the last card shown for each `groupKey`, and when a later card with that key has a `to` no more than 12 hours before that card's `from`, add its `total`, take its `from` and `more`, and append its `subjects`. Otherwise it is a new card. Most merging happens inside the service, so the client rule matters only at page edges and for groups longer than the row budget. The absence of `more` does not mean that a group is complete: a group also continues after a page that ended for another reason, so clients always merge by `groupKey` and the 12-hour rule, never by `more`. A continuation of fewer than 3 rows is returned as separate records and is not merged.
 
-A page ends only at a chunk boundary, so the next page starts a new chunk. When the page's last chunk is `capped`, the cursor names its run (`group` in the cursor: the `groupKey` and the kind), and the next page marks its first item `continued`, with the same `groupKey`, if the first row after the cursor still joins that run: same kind, same key, and no more than 12 hours after the cursor's row. The statement applies the same adjacency predicate to that row as to every other row. The cursor row's key (its account, and its folder for audio) is not in the cursor. The statement reads the row by primary key and derives the key with the same expressions the arms use. The run continues only while that row still exists, is valid and in range, is of the named kind, and still has the timestamp the cursor carries. Otherwise the first item starts a new run.
+**Audio owner and folder.** A recording whose `deploymentRef` is an AT-URI belongs to that recorder folder, and the folder's owner, the account in the AT-URI, owns the group whoever stored the recording. A recording without a folder belongs to its own account. If the authority of the AT-URI is not a valid DID, because it is a handle or anything else, the recording also falls back to its own account, because `groupItem.did` must be a DID. A valid DID here is the shape the Lexicon's `did` format accepts: `did:method:id`, a lowercase method, the characters `A-Z a-z 0-9 . _ : % -`, no trailing `:` or `%`, at most 2,048 characters. The card names the folder in `groupItem.deployment` only when `deploymentRef` is a valid AT-URI, by the strict `isAtUriString` test, which is also what the output check of `format: at-uri` applies. For any other value (`at://did:/x`, a trailing slash, a query, a path that is not a collection and a key) `deployment` is omitted and the recordings still group by the raw `deploymentRef`, with the owner rule above. One malformed `deploymentRef` therefore cannot fail the page that holds it. A recording shown as a `recordItem` names the account that stored it in `did`; the owner of its folder is only the group's. The app also looks the folder up and falls back to the recording's account when the folder record is missing; the service reads the owner from the AT-URI and does not look the folder up.
 
-Results are current state, so `capped` does not guarantee that the next page starts `continued`: a write between two requests, such as the cursor row being deleted, can break the continuation. `continued` is the authority, and a client merges only on it.
+**Bioacoustic sightings.** An observation whose `dynamicProperties` text parses to a `gainforestBioacoustics` sidecar with version 1, a source audio URI that appears in `associatedMedia`, a known label category, and numeric time and frequency bounds is shown on its own, with its spectrogram. The statement parses the sidecar only for observations whose text mentions it.
 
-### Reads per page
-
-One statement answers a page. It may read at most `limit × 200 + 1` rows of the merged feed order: the page's items cover at most `limit × 200` rows, and one more row, the first row of the item after the page, proves that a next page exists and tells whether the last chunk is `capped`. The row that follows an item is the first row of the next item, so no item needs a lookahead of its own. This is an upper bound. The statement streams the merged order and stops at the first row of the item after the sentinel item (the item that only proves that a next page exists), so it reads up to the end of the sentinel chunk, which is at most 200 rows more than the page's own items. An ordinary page reads a few hundred rows (892 for a first page of 20 items on the evidence data below) and only a page made of full chunks reads the whole bound. A page that continues a capped run adds one primary-key read of the cursor row. There is no wider second window, no incomplete page, and no error for a long run. A statement that exceeds the statement timeout is a database problem and surfaces as `InternalError`.
+**Reads per request.** One statement answers a request whose first batch holds the page, which is nearly every request. A page that folds a long dump needs a statement per 500 rows it consumes, and a request never runs more than 10, so it never reads more than 5,000 rows. When a batch ends exactly where the page ends, one more statement shows that the next row starts a card. Each statement is bounded by the statement timeout, so a request is bounded by 10 of them. Nothing is retried: a statement that exceeds the statement timeout is a database problem and surfaces as `InternalError`. A request fetches at most 5,000 rows and consumes fewer when the page ends inside a batch: the rest of that batch is read and dropped.
 
 ## Hyperindex behavior the feed depends on
 
@@ -118,8 +116,7 @@ FROM record
 WHERE collection IN (
   'org.hypercerts.collection', 'app.certified.actor.organization',
   'app.gainforest.feed.post', 'app.gainforest.feed.repost',
-  'app.gainforest.dwc.occurrence', 'app.gainforest.ac.audio',
-  'app.certified.graph.follow'
+  'app.gainforest.dwc.occurrence', 'app.gainforest.ac.audio'
 )
 GROUP BY 1, 2
 ORDER BY 1, 2;
@@ -139,11 +136,10 @@ Used today, all from existing migrations:
 idx_record_timeline_collection_created
   ON record (collection, record_created_at DESC, uri DESC)
   WHERE record_created_at IS NOT NULL                          -- migration 010
-idx_record_did_collection ON record (did, collection)          -- migration 001
 record_pkey ON record (uri)                                    -- repost subject lookups
 ```
 
-The per-kind arms walk `idx_record_timeline_collection_created`, in index order and only as far as the merged page needs. Follow lookups use `idx_record_did_collection`. The record behind each of the page's own items, the subject of each repost, and the few observations whose text mentions a bioacoustic sidecar are read by primary key. The `scripts/test-hyperindex-schema.sh` preflight checks that the first two exist.
+The per-kind arms walk `idx_record_timeline_collection_created`, in index order and only as far as the merged batch needs. The subject of each repost is read by primary key. The `scripts/test-hyperindex-schema.sh` preflight checks that `idx_record_timeline_collection_created` exists. It also still checks `idx_record_did_collection` (`record (did, collection)`, migration 001), which the activity feed statement does not read.
 
 ### Proposal for the Hyperindex owners
 
@@ -158,49 +154,38 @@ CREATE INDEX CONCURRENTLY idx_record_feed_post_toplevel
     AND (json->>'reply') IS NULL;
 ```
 
-PostgreSQL estimates that the post filters match very few rows (about 8). With the current statement it still walks the timeline index for posts on the evidence data below, and a post-only page of 50 takes about 3 ms, so the index is not needed there. Build it only if the plan of the post arm on the production-shaped table shows a Bitmap Heap Scan and a sort: that was the plan of the previous statement and cost about 40 ms of every request that included posts.
+PostgreSQL estimates that the post filters match very few rows (about 9, where about 3,000 match). The statement hides its limit from the planner, which keeps the post arm on the ordered timeline index: a posts-only request takes about 1.3 ms of execution on the evidence data below, so the index is not needed there. Build it only if the plan of the post arm on the production-shaped table shows a Bitmap Heap Scan and a sort: with a visible limit that was the plan, and it read every post of the collection for every request that included posts.
 
 ### Evidence from scratch databases
 
-These numbers come from a throwaway local PostgreSQL 16.15 cluster with the real Hyperindex migrations 001 through 014 applied and synthetic data shaped like the staging table when pages started failing. They are warm-cache runs of the feed statement under `EXPLAIN (ANALYZE, BUFFERS)` with JIT off, not a benchmark, and planning adds about 5 ms. The figures for the statement before this change were measured earlier on the same data shape. The table had 172,095 rows: 39,362 observations (16,044 of them invalid), 63,107 audio recordings (two recorders with 1,700 and 1,400 recordings in the newest day, uploaded one after the other), 4,025 posts, 1,900 collections (about 760 typed project), 101 organizations, 600 reposts, 3,000 follows, and 60,000 rows of collections the feed ignores. Every statement ran twice, on the load-ordered heap and on a copy in random physical order, which is the harder case for an ordered index scan. The ranges below cover both.
+These numbers come from a throwaway local PostgreSQL 16.15 cluster with the real Hyperindex migrations 001 through 014 applied and synthetic data shaped like the staging table when pages started fragmenting. They are warm-cache measurements with JIT off, not a benchmark. The table had 172,095 rows: 39,362 observations (16,044 of them invalid), 63,107 audio recordings (two recorders with 1,700 and 1,400 recordings in the last few hours, uploaded at the same time, three and four seconds apart), 4,025 posts, 1,900 collections (about 760 typed project), 101 organizations, 600 reposts, and 63,000 rows of collections the feed ignores (3,000 of them follow records).
 
-The statement before this change, first page of 20 items, needed two statements:
-
-```text
-scan window 512 (page incomplete)        49-73 ms
-scan window 8,192 (the second statement) 509-608 ms   Bitmap Heap Scan over all 63,107 audio and all 39,362
-                                                      observation rows, external-merge sorts of 15.8 MB and
-                                                      5.2 MB, and the full json carried through the sort
-```
-
-The current statement, one statement per page (medians of five runs, JIT off):
+One request, the wall-clock time of `FeedService.getFeed` (median of seven runs), the statements it sent, and the sum over those statements of the planning and execution time that `EXPLAIN (ANALYZE, BUFFERS)` reports (the minimum of seven runs each):
 
 ```text
-all kinds, limit 20, first page                       10-11 ms   892 rows read of 4,001
-all kinds, limit 50, first page                       20-21 ms   1,805 rows read of 10,001
-audio only, limit 20 / 50                             18-19 ms / 17-20 ms
-observations only, limit 20 / 50                      3 ms / 3-4 ms
-following (20 follows), all kinds, limit 20 / 50      13-17 ms / 20-26 ms
-following nobody, limit 20 / 50                       0.8-1.0 ms / 0.8 ms   (about 99 ms without the guard)
-all kinds, limit 50, cursor 30 / 90 / 200 days back   7 / 5 / 7-9 ms
-walk of a capped audio run, limit 4, every page       1-9 ms   (the open run is read by primary key)
-worst case, 12,000-row runs, every row of the bound is read
-  audio, limit 20 / 50                                37 / 93 ms    4,001 / 10,001 rows
-  observations, limit 20 / 50                         29 / 72 ms    4,001 / 10,001 rows
+                                                        statements   request   planning + execution
+all kinds, limit 20, page 1 (holds the 3,100-row dump)       7        40 ms      6.9 + 14.4 ms
+all kinds, limit 50, page 1 (the same dump)                  7        38 ms      7.0 + 14.4 ms
+all kinds, limit 20, pages 2, 3, 6, 12                       1       7 ms        1.0 + 4.1-4.2 ms
+all kinds, limit 20, cursor inside the dump (row 1,000)      5        25 ms      5.0 + 10.8 ms
+audio only, limit 20, page 1 (holds the dump)                8        35 ms      5.5 + 13.2 ms
+audio only, limit 50, page 1                                10        43 ms      7.4 + 17.3 ms
+audio only, limit 20, cursor inside the dump (row 1,000)     6        25 ms      4.0 + 9.8 ms
+observations only, limit 20 / 50                             1       6 / 8 ms    0.7 + 4.1 ms
+posts only / projects only, limit 20                         1       3 / 4 ms    0.7 + 1.3 / 1.5 ms
 ```
 
-Telling a recording's owner apart from a bad authority costs about 0.8 microseconds per audio row the statement reads (a regular expression on the authority). That is about 1 to 2 ms of the audio and all-kinds pages above, and up to 5 ms for a viewer with few follows, whose scan reads thousands of recordings to find a few.
+A statement of 500 rows costs about 1 ms of planning and 1.3 ms (posts, projects), 2 ms (audio), or 4 ms (observations, each with a text test for a bioacoustic sidecar) of execution. A request that folds the whole 3,100-row dump needs 7 statements; the most a request can need is 10, about 43 ms here. Through the HTTP application, with the output check, `getFeed` took 44 to 49 ms for the three pages that fold a dump, and `getFeedSkeleton` 48 to 49 ms for the all-kinds pages, whose skeleton holds 3,230 entries (284 KiB); an audio-only skeleton of 4,934 entries (434 KiB) took 54 ms.
 
-No plan used a bitmap scan on a feed collection, a sequential scan, or a sort that left memory (the largest sort was 1.5 MB). The follow lookup reads the viewer's follow records with a bitmap scan on `idx_record_did_collection`, which is not a feed collection. The estimated cost stayed near 12,000, far below PostgreSQL's default `jit_above_cost` of 100,000, so JIT did not start.
+No plan used a bitmap scan on a feed collection, a sequential scan, or a sort that left memory. The only sorts are 25 kB sorts of arms that the kind filter switched off, which return no rows. The estimated cost of the statement is about 2,200 on this table, far below PostgreSQL's default `jit_above_cost` of 100,000, so JIT did not start; it grows with the table because the limit is hidden from the planner, and the pool switches JIT off.
 
-What keeps the plan this way is listed in the header of `src/feed/feed-query.sql`. In short: the observation and audio arms and the merged stream take their limit from a subquery, because a literal limit above about a third of a collection makes PostgreSQL switch to a bitmap scan and a sort of the whole collection; the cursor is an inline predicate so a deep page is an index condition; the window levels stream and `item_no` is a `count(*) FILTER` so the window stops early; and no record content is read before it is known to matter.
+What keeps the plan this way is listed in the header of `src/feed/feed-query.sql`. In short: every arm and the merged stream take their limit from a subquery, because a visible limit makes PostgreSQL leave the ordered index scan of an arm whose filter it thinks is selective (the post arm) for a bitmap scan and a sort of the whole collection; the cursor is an inline predicate so a deep page is an index condition; and the audio folder and the sidecar are read once per row.
 
 Known follow-ups, deliberately not built:
 
-- A viewer who follows few accounts, with little audio or observation history, still makes the audio and observation arms walk their collections: each reads the timeline index newest first and filters by owner as it goes, so with few matching rows it reaches the end of the collection before the bound helps. The guard above fixes the extreme case of a viewer who follows nobody, and a viewer with 20 active follows takes 13 to 26 ms. A viewer with a few follows who have posted no audio or observations took 1.5 to 1.6 s on a table ten times the evidence data (measured when this branch was reviewed). The real fix is one more arm per kind that is driven by the followed accounts, reading `idx_record_timeline_author_collection_created` (`did, collection, record_created_at DESC, uri DESC`) for each followed account and merging the results. Audio cannot use that index directly, because its owner is the folder's owner from `deploymentRef`, not the account in `did`; an audio arm would have to find the folders the followed accounts own as well as their own recordings. It is not built.
-- Interleaved uploads fragment runs. Adjacent recordings must share an owner and a folder, so two recorders uploading at the same time, or one account mixing observations and recordings, produce many one- and two-row items where the old upload-day groups produced one. This is the intended rule; it is a product question whether to relax it.
-- A long observation run costs about 9 us per row on the evidence data (88 ms for 10,001 rows), partly because every observation of the run gets a text test for a bioacoustic sidecar, with a primary-key read only for the rare match. A partial index on the observations whose `dynamicProperties` mention `gainforestBioacoustics` could make that test cheaper. It has not been measured and is not proposed.
-- The estimated cost of the statement grows with the number of rows in the collections, because PostgreSQL plans for the first tenth of the rows: about 12,000 on the evidence data and about 95,000 on a table ten times as large (measured when this branch was reviewed), close to the default `jit_above_cost` of 100,000. Above it JIT compilation would add 100 to 150 ms to every page, and it cannot help a statement that runs in 10 ms. The pool therefore opens every session with `-c jit=off` (`src/database.ts`). Nothing needs to be configured on the database.
+- **Planned: a separate following feed.** Following is not part of `activityFeed` and not part of this release. It is planned as its own feed id (`#followingFeed`) with its own params definition in the `params` open union, and a follow-driven query: it starts from the followed accounts and reads each one's records through the author index `idx_record_timeline_author_collection_created` (`did, collection, record_created_at DESC, uri DESC`), merging the results, instead of walking each collection and filtering by owner. Audio ownership through the recorder folder is still to be handled: the owner of a recording is the folder's owner from `deploymentRef`, not the account in `did`, so that index cannot find the recordings that other accounts stored in a followed account's folder, and the query would have to find the folders the followed accounts own as well as their own recordings.
+- A statement always asks each arm for up to 500 rows, so a request that needs a handful of rows still reads the rows its arms produce for the merge (about 4 ms of execution on this table, most of it for observations). A smaller first batch would make ordinary pages cheaper and long dumps cost more statements; 500 is the batch the design was approved with.
+- The estimated cost of the statement grows with the number of rows in the collections, because PostgreSQL plans for the first tenth of the rows (about 2,200 on the evidence data). The pool opens every session with `-c jit=off` (`src/database.ts`), so no table size can start JIT compilation, which would add 100 to 150 ms to every statement. Nothing needs to be configured on the database.
 
 ## Schema preflight and integration tests
 
@@ -213,4 +198,4 @@ TEST_DATABASE_URL='postgresql://postgres:postgres@localhost:5432/hyperindex_feed
   npm run test:integration:hyperindex
 ```
 
-The command requires `psql`, checks PostgreSQL 16+, the `record` columns, and the two indexes above (`idx_record_timeline_collection_created` and `idx_record_did_collection`), then runs `npm run test:integration`. It does not apply migrations. The suite's direct SQL fixture loading does not exercise Hyperindex's ingestion path or its `record_created_at` materialization.
+The command requires `psql`, checks PostgreSQL 16+, the `record` columns, and the two indexes it names (`idx_record_timeline_collection_created` and `idx_record_did_collection`), then runs `npm run test:integration`. It does not apply migrations. The suite's direct SQL fixture loading does not exercise Hyperindex's ingestion path or its `record_created_at` materialization.

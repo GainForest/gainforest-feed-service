@@ -20,7 +20,7 @@ import {
 } from '../src/feed/types.js'
 import { Metrics } from '../src/metrics.js'
 
-const viewer = 'did:plc:ar7c4by46qjdydhdevvrndac'
+const caller = 'did:plc:ar7c4by46qjdydhdevvrndac'
 const actor = 'did:plc:ewvi7nxzyoun6zhxrhs64oiz'
 const uri = `at://${actor}/app.gainforest.feed.post/3kpn`
 const cid = 'bafyreia3tbsfxe3cc75xrxyyn6qc42oupi73fxiox76prlyi5bpx7hr72u'
@@ -76,9 +76,9 @@ const serverAddress = (
   return address
 }
 
-const feedRequest = (viewerDid = viewer): FeedRequest => ({
+const feedRequest = (): FeedRequest => ({
   feedId: ACTIVITY_FEED_ID,
-  params: { $type: ACTIVITY_FEED_PARAMS_TYPE, viewerDid },
+  params: { $type: ACTIVITY_FEED_PARAMS_TYPE },
 })
 
 const post = (
@@ -134,7 +134,7 @@ describe('HTTP application', () => {
     const auth: OptionalServiceAuth = ({ request }) => {
       request.signal.throwIfAborted()
       expect(request.headers.get('authorization')).toBe('Bearer test-token')
-      return Promise.resolve(trustedCredentials(viewer))
+      return Promise.resolve(trustedCredentials(caller))
     }
     const app = createApp(
       compatibleDatabase,
@@ -338,119 +338,101 @@ describe('HTTP application', () => {
     })
   })
 
+  // The activity feed gives every caller the same page, so the verified issuer
+  // of a token is not added to the request the feed receives.
   it.each([
     ['skeleton', skeletonPath],
     ['feed', feedPath],
   ] as const)(
-    'binds authenticated omitted viewerDid to the %s service',
+    'passes the same request to the %s service with and without a verified caller',
     async (_label, url) => {
-      let received: FeedRequest | undefined
-      const skeleton: FeedSkeletonReader = {
-        getFeedSkeleton: vi.fn((input: FeedRequest) => {
-          received = input
-          return Promise.resolve({ feed: [] })
-        }),
+      const received: FeedRequest[] = []
+      const remember = (input: FeedRequest) => {
+        received.push(input)
+        return Promise.resolve({ feed: [] })
       }
-      const feedReader: FeedReader = {
-        getFeed: vi.fn((input: FeedRequest) => {
-          received = input
-          return Promise.resolve({ feed: [] })
-        }),
-      }
-      const app = createApp(
-        compatibleDatabase,
-        appServices(skeleton, feedReader),
-        new Metrics(),
-        logger,
-        authFor(trustedCredentials(viewer)),
+      const services = appServices(
+        { getFeedSkeleton: vi.fn(remember) },
+        { getFeed: vi.fn(remember) },
       )
-
-      const response = await app.fetch(
-        post(
-          url,
-          JSON.stringify({
-            feedId: ACTIVITY_FEED_ID,
-            params: { $type: ACTIVITY_FEED_PARAMS_TYPE },
-          }),
-          { authorization: 'Bearer trusted-token' },
-        ),
-      )
-
-      expect(response.status).toBe(200)
-      expect(received).toMatchObject({
+      const body = JSON.stringify({
         feedId: ACTIVITY_FEED_ID,
-        params: { $type: ACTIVITY_FEED_PARAMS_TYPE, viewerDid: viewer },
+        params: { $type: ACTIVITY_FEED_PARAMS_TYPE, filter: 'post' },
       })
+
+      for (const [credentials, headers] of [
+        [undefined, {}],
+        [trustedCredentials(caller), { authorization: 'Bearer trusted-token' }],
+      ] as const) {
+        const app = createApp(
+          compatibleDatabase,
+          services,
+          new Metrics(),
+          logger,
+          authFor(credentials),
+        )
+        const response = await app.fetch(post(url, body, headers))
+        expect(response.status).toBe(200)
+      }
+
+      const expected = {
+        feedId: ACTIVITY_FEED_ID,
+        params: { $type: ACTIVITY_FEED_PARAMS_TYPE, filter: 'post' },
+      }
+      expect(received).toEqual([expected, expected])
+      expect(JSON.stringify(received)).not.toContain(caller)
     },
   )
 
+  // The Lexicon object is open, so the router accepts a property the feed does
+  // not define and hands it on; the feed drops it (see the query tests). Every
+  // value is accepted: the properties no longer exist, so none can be invalid.
   it.each([
     ['skeleton', skeletonPath],
     ['feed', feedPath],
   ] as const)(
-    'rejects an authenticated supplied viewer mismatch on the %s route',
+    'accepts following and viewerDid on the %s route without reading them',
     async (_label, url) => {
-      const getFeedSkeleton = vi.fn()
-      const getFeed = vi.fn()
+      const received: FeedRequest[] = []
+      const remember = (input: FeedRequest) => {
+        received.push(input)
+        return Promise.resolve({ feed: [] })
+      }
       const app = createApp(
         compatibleDatabase,
-        appServices({ getFeedSkeleton }, { getFeed }),
-        new Metrics(),
-        logger,
-        authFor(trustedCredentials(viewer)),
-      )
-
-      const response = await app.fetch(
-        post(url, JSON.stringify(feedRequest(actor)), {
-          authorization: 'Bearer trusted-token',
-        }),
-      )
-
-      expect(response.status).toBe(400)
-      expect(getFeedSkeleton).not.toHaveBeenCalled()
-      expect(getFeed).not.toHaveBeenCalled()
-      await expectErrorResponse(
-        response,
-        'InvalidRequest',
-        'does not match the authenticated',
-      )
-    },
-  )
-
-  it.each([
-    ['skeleton', skeletonPath],
-    ['feed', feedPath],
-  ] as const)(
-    'requires viewerDid for anonymous following requests on the %s route',
-    async (_label, url) => {
-      const getFeedSkeleton = vi.fn()
-      const getFeed = vi.fn()
-      const app = createApp(
-        compatibleDatabase,
-        appServices({ getFeedSkeleton }, { getFeed }),
-        new Metrics(),
-        logger,
-        authFor(undefined),
-      )
-
-      const response = await app.fetch(
-        post(
-          url,
-          JSON.stringify({
-            feedId: ACTIVITY_FEED_ID,
-            params: { $type: ACTIVITY_FEED_PARAMS_TYPE, following: true },
-          }),
+        appServices(
+          { getFeedSkeleton: vi.fn(remember) },
+          { getFeed: vi.fn(remember) },
         ),
+        new Metrics(),
+        logger,
       )
 
-      expect(response.status).toBe(400)
-      expect(getFeedSkeleton).not.toHaveBeenCalled()
-      expect(getFeed).not.toHaveBeenCalled()
-      await expectErrorResponse(
-        response,
-        'InvalidRequest',
-        'required for anonymous requests that set following',
-      )
+      for (const extra of [
+        { following: true },
+        { following: true, viewerDid: caller },
+        { following: 'yes', viewerDid: 'alice.test' },
+      ]) {
+        const response = await app.fetch(
+          post(
+            url,
+            JSON.stringify({
+              feedId: ACTIVITY_FEED_ID,
+              params: { $type: ACTIVITY_FEED_PARAMS_TYPE, ...extra },
+            }),
+          ),
+        )
+        expect(response.status).toBe(200)
+        await expect(response.json()).resolves.toEqual({ feed: [] })
+      }
+
+      expect(received).toHaveLength(3)
+      for (const request of received) {
+        expect(request.params).toMatchObject({
+          $type: ACTIVITY_FEED_PARAMS_TYPE,
+          filter: 'all',
+        })
+      }
     },
   )
 
@@ -458,7 +440,7 @@ describe('HTTP application', () => {
     ['skeleton', skeletonPath],
     ['feed', feedPath],
   ] as const)(
-    'serves the anonymous global feed on the %s route without a viewer',
+    'serves the global feed on the %s route without credentials',
     async (_label, url) => {
       let received: FeedRequest | undefined
       const app = createApp(
@@ -496,7 +478,6 @@ describe('HTTP application', () => {
       expect(received?.params).toEqual({
         $type: ACTIVITY_FEED_PARAMS_TYPE,
         filter: 'post',
-        following: false,
       })
     },
   )
@@ -525,7 +506,6 @@ describe('HTTP application', () => {
 
       expect(response.status).toBe(401)
       expect(body).not.toContain(token)
-      expect(body).not.toContain(viewer)
       expect(getFeedSkeleton).not.toHaveBeenCalled()
       expect(getFeed).not.toHaveBeenCalled()
     },
@@ -547,26 +527,25 @@ describe('HTTP application', () => {
               createdAt: '2026-07-21T10:00:00.000Z',
             },
             {
-              $type: 'app.gainforest.feed.defs#burstItem' as const,
+              $type: 'app.gainforest.feed.defs#groupItem' as const,
+              kind: 'observation' as const,
               did: actor,
               total: 200,
               from: '2026-07-21T09:00:00.000Z',
               to: '2026-07-21T09:30:00.000Z',
               subjects: [`at://${actor}/app.gainforest.dwc.occurrence/o1`],
               groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
-              continued: false,
-              capped: true,
+              more: true,
             },
             {
-              $type: 'app.gainforest.feed.defs#audioItem' as const,
+              $type: 'app.gainforest.feed.defs#groupItem' as const,
+              kind: 'audio' as const,
               did: actor,
               total: 12,
               from: '2026-07-20T22:00:00.000Z',
               to: '2026-07-20T23:00:00.000Z',
               subjects: [`at://${actor}/app.gainforest.ac.audio/a1`],
               groupKey: 'BBBBBBBBBBBBBBBBBBBBBB',
-              continued: true,
-              capped: false,
             },
           ],
           cursor: 'next',
@@ -585,10 +564,7 @@ describe('HTTP application', () => {
     )
 
     expect(response.status).toBe(200)
-    expect(received).toMatchObject({
-      feedId: ACTIVITY_FEED_ID,
-      params: { $type: ACTIVITY_FEED_PARAMS_TYPE, viewerDid: viewer },
-    })
+    expect(received).toMatchObject(feedRequest())
     await expect(response.json()).resolves.toEqual({
       feed: [
         {
@@ -600,26 +576,25 @@ describe('HTTP application', () => {
           createdAt: '2026-07-21T10:00:00.000Z',
         },
         {
-          $type: 'app.gainforest.feed.defs#burstItem',
+          $type: 'app.gainforest.feed.defs#groupItem',
+          kind: 'observation',
           did: actor,
           total: 200,
           from: '2026-07-21T09:00:00.000Z',
           to: '2026-07-21T09:30:00.000Z',
           subjects: [`at://${actor}/app.gainforest.dwc.occurrence/o1`],
           groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
-          continued: false,
-          capped: true,
+          more: true,
         },
         {
-          $type: 'app.gainforest.feed.defs#audioItem',
+          $type: 'app.gainforest.feed.defs#groupItem',
+          kind: 'audio',
           did: actor,
           total: 12,
           from: '2026-07-20T22:00:00.000Z',
           to: '2026-07-20T23:00:00.000Z',
           subjects: [`at://${actor}/app.gainforest.ac.audio/a1`],
           groupKey: 'BBBBBBBBBBBBBBBBBBBBBB',
-          continued: true,
-          capped: false,
         },
       ],
       cursor: 'next',
@@ -962,32 +937,6 @@ describe('HTTP application', () => {
   })
 
   it.each([
-    ['skeleton', skeletonPath],
-    ['feed', feedPath],
-  ])(
-    'rejects a malformed viewer for the %s route as InvalidRequest',
-    async (_label, url) => {
-      const getFeedSkeleton = vi.fn()
-      const getFeed = vi.fn()
-      const app = createApp(
-        compatibleDatabase,
-        appServices({ getFeedSkeleton }, { getFeed }),
-        new Metrics(),
-        logger,
-      )
-
-      const response = await app.fetch(
-        post(url, JSON.stringify(feedRequest('alice.test'))),
-      )
-
-      expect(response.status).toBe(400)
-      expect(getFeedSkeleton).not.toHaveBeenCalled()
-      expect(getFeed).not.toHaveBeenCalled()
-      await expectErrorResponse(response, 'InvalidRequest', 'Invalid DID')
-    },
-  )
-
-  it.each([
     [
       'skeleton',
       skeletonPath,
@@ -1134,10 +1083,13 @@ describe('HTTP application', () => {
       appServices(emptySkeleton(), { getFeed }),
       metrics,
       logger,
+      authFor(trustedCredentials(caller)),
     )
 
     const response = await app.fetch(
-      post(feedPath, JSON.stringify(feedRequest())),
+      post(feedPath, JSON.stringify(feedRequest()), {
+        authorization: 'Bearer trusted-token',
+      }),
     )
     const responseText = await response.text()
     const metricText = await metrics.registry.metrics()
@@ -1147,7 +1099,7 @@ describe('HTTP application', () => {
     expect(JSON.parse(responseText)).toMatchObject({ error: 'InternalError' })
     expect(metricText).toContain('route="feed"')
     expect(metricText).toContain('error="InternalError"')
-    expect(metricText).not.toContain(viewer)
+    expect(metricText).not.toContain(caller)
     expect(metricText).not.toContain(uri)
   })
 

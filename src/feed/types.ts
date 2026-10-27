@@ -24,6 +24,7 @@ export const RECORD_ITEM_KINDS = [
   'observation',
   'organization',
   'post',
+  'audio',
 ] as const
 
 /** Which kind of record a `recordItem` points at. */
@@ -32,21 +33,16 @@ export type RecordItemKind = (typeof RECORD_ITEM_KINDS)[number]
 /** Wire discriminators for the feed item union. */
 export const RECORD_ITEM_TYPE = 'app.gainforest.feed.defs#recordItem' as const
 export const REPOST_ITEM_TYPE = 'app.gainforest.feed.defs#repostItem' as const
-export const BURST_ITEM_TYPE = 'app.gainforest.feed.defs#burstItem' as const
-export const AUDIO_ITEM_TYPE = 'app.gainforest.feed.defs#audioItem' as const
+export const GROUP_ITEM_TYPE = 'app.gainforest.feed.defs#groupItem' as const
 
 /** Bounded metric label for one feed item. */
-export type FeedItemKind = RecordItemKind | 'repost' | 'burst' | 'audio'
+export type FeedItemKind = RecordItemKind | 'repost' | 'group'
 
 /** Parameters accepted by the activity feed. */
 export interface ActivityFeedParams {
   readonly $type: typeof ACTIVITY_FEED_PARAMS_TYPE
   /** Which kind of activity to include; omitted means `all`. */
   readonly filter?: string
-  /** Viewer whose follows scope the feed when `following` is true. */
-  readonly viewerDid?: string
-  /** Limit the feed to accounts the viewer follows. */
-  readonly following?: boolean
 }
 
 /** Discriminator retained when the public open union receives an unknown variant. */
@@ -70,7 +66,7 @@ export interface FeedRequest {
   readonly cursor?: string
 }
 
-/** A reference to one project, observation, organization, or post record. */
+/** A reference to one project, observation, organization, post, or audio recording. */
 export interface RecordItem {
   readonly $type: typeof RECORD_ITEM_TYPE
   readonly kind: RecordItemKind
@@ -93,67 +89,56 @@ export interface RepostItem {
   readonly subject: string
 }
 
+/** Kinds of record that can form a group. */
+export type GroupKind = 'observation' | 'audio'
+
 /**
- * Most rows one burst or audio item covers. A longer run continues in the next
- * item, so no item, and no page, ever has to read a whole long run.
+ * Fewest rows a group needs. A group of fewer rows is returned as separate
+ * record items, each at its own position in the feed.
  */
-export const MAX_GROUP_ROWS = 200
+export const MIN_GROUP_ROWS = 3
 
-/** The group fields of a burst or audio item: one chunk of one run. */
-export interface GroupChunk {
-  /**
-   * Opaque identifier of the run. Every chunk of one run carries the same
-   * value and no two runs share one.
-   */
-  readonly groupKey: string
-  /** True for every chunk after the first one of its run. */
-  readonly continued: boolean
-  /** True when this chunk is full and the run goes on in the next item. */
-  readonly capped: boolean
-}
+/** Most sample URIs a group item references. */
+export const GROUP_SAMPLE_SIZE = 20
 
-/** A run of observations by one account that are adjacent in the feed. */
-export interface BurstItem extends GroupChunk {
-  readonly $type: typeof BURST_ITEM_TYPE
+/**
+ * Observations by one account, or recordings in one recorder folder, that the
+ * page folded into one card: at least `MIN_GROUP_ROWS` rows whose neighbours
+ * inside the group are no more than 12 hours apart.
+ */
+export interface GroupItem {
+  readonly $type: typeof GROUP_ITEM_TYPE
+  readonly kind: GroupKind
+  /** Account of the observations, or owner of the recorder folder. */
   readonly did: string
   /**
-   * Number of observations in this item, at most 200. It is not the size of
-   * the whole run when the run continues in other items.
-   */
-  readonly total: number
-  /** createdAt of the oldest observation in this item. */
-  readonly from: string
-  /** createdAt of the newest observation in this item. */
-  readonly to: string
-  /** Up to 20 observation URIs, newest first. */
-  readonly subjects: readonly string[]
-}
-
-/** A run of recordings in one recorder folder that are adjacent in the feed. */
-export interface AudioItem extends GroupChunk {
-  readonly $type: typeof AUDIO_ITEM_TYPE
-  /** Owner of the folder, or the recording's own account without a folder. */
-  readonly did: string
-  /**
-   * AT-URI of the recorder folder, when the recordings belong to one and it
-   * is a valid AT-URI. A `deploymentRef` that is not one is left out.
+   * AT-URI of the recorder folder, when the recordings belong to one and it is
+   * a valid AT-URI. A `deploymentRef` that is not one is left out.
    */
   readonly deployment?: string
-  /**
-   * Number of recordings in this item, at most 200. It is not the size of the
-   * whole run when the run continues in other items.
-   */
+  /** Stable hash of the group's kind, owner, and folder; the same on every page. */
+  readonly groupKey: string
+  /** Number of rows in this card. */
   readonly total: number
-  /** createdAt of the oldest recording in this item. */
+  /** createdAt of the oldest row in this card. */
   readonly from: string
-  /** createdAt of the newest recording in this item. */
+  /** createdAt of the newest row in this card. This orders the card in the feed. */
   readonly to: string
-  /** Up to 20 recording URIs, newest first. */
+  /** Up to 20 URIs from this card, newest first. */
   readonly subjects: readonly string[]
+  /**
+   * True when the request's row budget ended the page while this card could
+   * still be continued: it is the group's latest card, and the page's last row
+   * is within 12 hours of its oldest row, so a later row can join it. Omitted
+   * otherwise. Its absence does not mean the group is complete: a group also
+   * continues after a page that ended for another reason. Clients always merge
+   * cards by `groupKey` and the 12-hour rule.
+   */
+  readonly more?: boolean
 }
 
 /** One entry of the activity feed: references and selection metadata, never records. */
-export type ActivityFeedItem = RecordItem | RepostItem | BurstItem | AudioItem
+export type ActivityFeedItem = RecordItem | RepostItem | GroupItem
 
 /** Public response body from app.gainforest.feed.getFeed. */
 export interface GetFeedOutput {
@@ -181,11 +166,7 @@ export interface GetFeedSkeletonOutput {
 export interface NormalizedActivityRequest {
   /** Which kind of activity to include. */
   readonly filter: ActivityFilter
-  /** Viewer whose follows scope the feed; present only when `following` is true. */
-  readonly viewerDid?: string
-  /** Whether the feed is limited to accounts the viewer follows. */
-  readonly following: boolean
-  /** Page size in the inclusive range 1..50. */
+  /** Cards a page is built from, in the inclusive range 1..50. */
   readonly limit: number
   /** Raw cursor supplied by the caller, if any. */
   readonly cursor?: string

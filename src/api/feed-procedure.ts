@@ -17,11 +17,7 @@ import {
 import type { Logger } from 'pino'
 
 import type { $input as feedInput } from '../lexicons/app/gainforest/feed/getFeedSkeleton.defs.js'
-import { applyAuthenticatedViewer } from '../auth/input.js'
-import type {
-  OptionalServiceAuth,
-  ServiceAuthCredentials,
-} from '../auth/service-auth.js'
+import type { OptionalServiceAuth } from '../auth/service-auth.js'
 import { FeedError, FeedErrorCode } from '../feed/errors.js'
 import type { FeedRequest } from '../feed/types.js'
 
@@ -55,7 +51,7 @@ interface RegisterFeedProcedureOptions<Output> {
   readonly errorLog: string
 }
 
-/** Registers a feed procedure with shared viewer binding, output validation, and error handling. */
+/** Registers a feed procedure with shared output validation and error handling. */
 export const registerFeedProcedure = <Output>({
   router,
   method,
@@ -65,14 +61,9 @@ export const registerFeedProcedure = <Output>({
   parseOutput,
   errorLog,
 }: RegisterFeedProcedureOptions<Output>): void => {
-  const handler = async (
-    input: FeedProcedureInput,
-    credentials: ServiceAuthCredentials | undefined,
-  ) => {
+  const handler = async (input: FeedProcedureInput) => {
     try {
-      const output = await execute(
-        applyAuthenticatedViewer(toFeedInput(input), credentials),
-      )
+      const output = await execute(toFeedInput(input))
       return { body: parseOutput(output) }
     } catch (cause) {
       if (cause instanceof FeedError) {
@@ -98,17 +89,15 @@ export const registerFeedProcedure = <Output>({
     }
   }
 
+  // The router verifies a supplied token before the handler runs, so an invalid
+  // one is a 401 and never an anonymous request. The verified caller is not read
+  // here: the activity feed gives every caller the same page for the same request.
+  const methodHandler: LexRouterMethodHandler<JsonProcedure> = async ({
+    input,
+  }) => handler(input.body)
   if (auth === undefined) {
-    const unauthenticatedHandler: LexRouterMethodHandler<
-      JsonProcedure,
-      void
-    > = async ({ input }) => handler(input.body, undefined)
-    router.add(method, unauthenticatedHandler)
+    router.add(method, methodHandler)
   } else {
-    const authenticatedHandler: LexRouterMethodHandler<
-      JsonProcedure,
-      ServiceAuthCredentials | undefined
-    > = async ({ input, credentials }) => handler(input.body, credentials)
-    router.add(method, { auth, handler: authenticatedHandler })
+    router.add(method, { auth, handler: methodHandler })
   }
 }

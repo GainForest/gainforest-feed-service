@@ -10,12 +10,13 @@ import {
 import { FeedErrorCode } from '../src/feed/errors.js'
 import {
   defineSqlFeed,
+  type FeedPosition,
   type SelectedItem,
   type SelectedPage,
   type SqlFeedQueryExecutor,
 } from '../src/feed/sql-feed.js'
 import {
-  BURST_ITEM_TYPE,
+  GROUP_ITEM_TYPE,
   RECORD_ITEM_TYPE,
   type FeedParams,
 } from '../src/feed/types.js'
@@ -31,9 +32,13 @@ const emptyDatabase: SqlFeedQueryExecutor<QueryResultRow> = {
   query: () => Promise.resolve({ rows: [] }),
 }
 
+const positionOf = (suffix: string, second: number): FeedPosition => ({
+  sortValue: `2026-07-21T10:00:0${String(second)}.000000Z`,
+  uri: `at://${did}/app.gainforest.feed.post/${suffix}`,
+})
+
 const recordItem = (suffix: string, second: number): SelectedItem => {
-  const uri = `at://${did}/app.gainforest.feed.post/${suffix}`
-  const sortValue = `2026-07-21T10:00:0${String(second)}.000000Z`
+  const { uri, sortValue } = positionOf(suffix, second)
   return {
     item: {
       $type: RECORD_ITEM_TYPE,
@@ -43,7 +48,7 @@ const recordItem = (suffix: string, second: number): SelectedItem => {
       did,
       createdAt: sortValue,
     },
-    position: { sortValue, uri },
+    uris: [uri],
   }
 }
 
@@ -82,62 +87,87 @@ const createFeed = (
   )
 
 describe('defineSqlFeed', () => {
-  it('encodes the next cursor from the last selected item only when another page follows', async () => {
+  it('encodes the cursor from the position the selection returns, and only then', async () => {
     const first = recordItem('3', 3)
     const last = recordItem('2', 2)
-    const feed = createFeed({ items: [first, last], hasNext: true })
+    const next = positionOf('2', 2)
+    const feed = createFeed({ items: [first, last], next })
 
     const page = await feed.loadPage({ $type: paramsType }, { limit: 2 })
 
     expect(page.items).toEqual([first.item, last.item])
     expect(decodeCursor(feedId, page.cursor, timestampUriCursor)).toEqual({
-      value: last.position.sortValue,
-      uri: last.position.uri,
+      value: next.sortValue,
+      uri: next.uri,
     })
 
-    const end = await createFeed({ items: [first], hasNext: false }).loadPage(
+    const end = await createFeed({ items: [first] }).loadPage(
       { $type: paramsType },
       {},
     )
     expect(Object.hasOwn(end, 'cursor')).toBe(false)
   })
 
-  it('points the cursor at the last row a burst consumed, not at its newest row', async () => {
-    const oldestMember = `at://${did}/app.gainforest.dwc.occurrence/oldest`
-    const burst: SelectedItem = {
+  it('points the cursor at the row the selection consumed last, not at the last item', async () => {
+    // A card that sits early on the page can hold the last row the page took.
+    const lastConsumed = `at://${did}/app.gainforest.dwc.occurrence/oldest`
+    const group: SelectedItem = {
       item: {
-        $type: BURST_ITEM_TYPE,
+        $type: GROUP_ITEM_TYPE,
+        kind: 'observation',
         did,
         total: 3,
         from: '2026-07-21T10:00:01.000Z',
         to: '2026-07-21T10:00:03.000Z',
         subjects: [`at://${did}/app.gainforest.dwc.occurrence/newest`],
         groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
-        continued: false,
-        capped: false,
       },
-      position: {
-        sortValue: '2026-07-21T10:00:01.000000Z',
-        uri: oldestMember,
-      },
+      uris: [`at://${did}/app.gainforest.dwc.occurrence/newest`, lastConsumed],
     }
-    const page = await createFeed({ items: [burst], hasNext: true }).loadPage(
-      { $type: paramsType },
-      {},
-    )
+    const page = await createFeed({
+      items: [group, recordItem('1', 1)],
+      next: { sortValue: '2026-07-21T10:00:00.500000Z', uri: lastConsumed },
+    }).loadPage({ $type: paramsType }, {})
 
     expect(decodeCursor(feedId, page.cursor, timestampUriCursor)).toEqual({
-      value: '2026-07-21T10:00:01.000000Z',
-      uri: oldestMember,
+      value: '2026-07-21T10:00:00.500000Z',
+      uri: lastConsumed,
     })
+  })
+
+  it('returns every URI the items cover, in item order, for the skeleton', async () => {
+    const group: SelectedItem = {
+      item: {
+        $type: GROUP_ITEM_TYPE,
+        kind: 'audio',
+        did,
+        total: 3,
+        from: '2026-07-21T10:00:01.000Z',
+        to: '2026-07-21T10:00:03.000Z',
+        subjects: ['at://x/y/1'],
+        groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
+      },
+      uris: ['at://x/y/1', 'at://x/y/2', 'at://x/y/3'],
+    }
+    const page = await createFeed({
+      items: [recordItem('4', 4), group, recordItem('0', 0)],
+    }).loadPage({ $type: paramsType }, {})
+
+    expect(page.uris).toEqual([
+      recordItem('4', 4).uris[0],
+      'at://x/y/1',
+      'at://x/y/2',
+      'at://x/y/3',
+      recordItem('0', 0).uris[0],
+    ])
   })
 
   it('hands the decoded cursor and normalized limit to the selection', async () => {
     const calls: SelectCall[] = []
-    const position = recordItem('1', 1).position
+    const position = positionOf('1', 1)
     const cursor = encodeCursor(feedId, position, timestampUriCursor)
 
-    await createFeed({ items: [], hasNext: false }, calls).loadPage(
+    await createFeed({ items: [] }, calls).loadPage(
       { $type: paramsType },
       { limit: 7, cursor },
     )
@@ -147,19 +177,21 @@ describe('defineSqlFeed', () => {
     ])
   })
 
-  it('rejects a selection larger than the page limit', async () => {
+  // A feed decides how many items a page holds: the activity feed counts
+  // cards, and a small group becomes several records, so a page can hold more
+  // items than its limit.
+  it('does not cap the items a feed selects at the limit', async () => {
     const feed = createFeed({
       items: [recordItem('3', 3), recordItem('2', 2), recordItem('1', 1)],
-      hasNext: false,
     })
 
-    await expect(
-      feed.loadPage({ $type: paramsType }, { limit: 2 }),
-    ).rejects.toThrow(/selected 3 items for a page limit of 2/i)
+    const page = await feed.loadPage({ $type: paramsType }, { limit: 2 })
+
+    expect(page.items).toHaveLength(3)
   })
 
   it('requires params with the registered discriminator', async () => {
-    const feed = createFeed({ items: [], hasNext: false })
+    const feed = createFeed({ items: [] })
 
     await expect(feed.loadPage(undefined, {})).rejects.toMatchObject({
       code: FeedErrorCode.InvalidRequest,
@@ -171,16 +203,14 @@ describe('defineSqlFeed', () => {
 
   it('applies the default params when a request omits them', async () => {
     const calls: SelectCall[] = []
-    const feed = createFeed(
-      { items: [], hasNext: false },
-      calls,
-      new Metrics(),
-      { $type: paramsType },
-    )
+    const feed = createFeed({ items: [] }, calls, new Metrics(), {
+      $type: paramsType,
+    })
 
     expect(feed.defaultParams).toEqual({ $type: paramsType })
     await expect(feed.loadPage(undefined, { limit: 4 })).resolves.toEqual({
       items: [],
+      uris: [],
     })
     expect(calls).toEqual([{ limit: 4, cursor: undefined }])
   })
@@ -189,12 +219,12 @@ describe('defineSqlFeed', () => {
     const calls: SelectCall[] = []
     const cursor = encodeCursor(
       otherFeedId,
-      recordItem('1', 1).position,
+      positionOf('1', 1),
       timestampUriCursor,
     )
 
     await expect(
-      createFeed({ items: [], hasNext: false }, calls).loadPage(
+      createFeed({ items: [] }, calls).loadPage(
         { $type: paramsType },
         { cursor },
       ),
@@ -205,7 +235,24 @@ describe('defineSqlFeed', () => {
   it('records result kinds and database timing', async () => {
     const metrics = new Metrics()
     await createFeed(
-      { items: [recordItem('1', 1)], hasNext: false },
+      {
+        items: [
+          recordItem('1', 1),
+          {
+            item: {
+              $type: GROUP_ITEM_TYPE,
+              kind: 'audio',
+              did,
+              total: 3,
+              from: '2026-07-21T10:00:01.000Z',
+              to: '2026-07-21T10:00:03.000Z',
+              subjects: ['at://x/y/1'],
+              groupKey: 'AAAAAAAAAAAAAAAAAAAAAA',
+            },
+            uris: ['at://x/y/1'],
+          },
+        ],
+      },
       [],
       metrics,
     ).loadPage({ $type: paramsType }, {})
@@ -216,6 +263,9 @@ describe('defineSqlFeed', () => {
     )
     expect(exposition).toContain(
       'hypercerts_feed_result_kinds_total{kind="post"} 1',
+    )
+    expect(exposition).toContain(
+      'hypercerts_feed_result_kinds_total{kind="group"} 1',
     )
   })
 
